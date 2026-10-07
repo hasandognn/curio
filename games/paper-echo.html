@@ -1,0 +1,1245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.ARCADE_GAME = "paper-echo";
+// Curio: the shared layer every page loads (the hub and each game).
+// One save ('arcade-v1') holds the player's level, daily missions and streak; each game keeps its own save untouched.
+window.Arcade = (() => {
+  const KEY = 'arcade-v1';
+  const GAMES = [
+    {id:'neon-2048', name:'Neon 2048', blurb:'Slide and merge tiles of light', color:'#ff8a3d', cat:'puzzle'},
+    {id:'neon-blocks', name:'Neon Blocks', blurb:'Stack, clear and light up the well', color:'#ff4d8d', cat:'puzzle'},
+    {id:'neon-orbit', name:'Neon Orbit', blurb:'Turn the ring, fire, light up the core', color:'#ffd23f', cat:'reflex'},
+    {id:'neon-fuse', name:'Neon Fuse', blurb:'Turn the wires, keep the spark alive', color:'#3ee0c5', cat:'puzzle'},
+    {id:'neon-tilt', name:'Neon Tilt', blurb:'Tilt the board, roll every ball home', color:'#5aa9ff', cat:'puzzle'},
+    {id:'paper-echo', name:'Paper Echo', blurb:'Paper birds sing, you sing it back', color:'#f2b84b', cat:'calm'},
+    {id:'afterimage', name:'Afterimage', blurb:'Your past self is right behind you', color:'#8f7bff', cat:'reflex'},
+    {id:'halves', name:'Halves', blurb:'One swipe, two equal halves', color:'#ffd400', cat:'puzzle'},
+    {id:'tightrope', name:'Tightrope', blurb:'Keep your balance high above the city', color:'#ff6b5b', cat:'reflex'},
+    {id:'lily', name:'Lily', blurb:'A frog, a pond, a night of fireflies', color:'#e8c26a', cat:'reflex'},
+    {id:'steep', name:'Steep', blurb:'A little tea house, poured by hand', color:'#d9733f', cat:'calm'},
+    {id:'deckload', name:'Deckload', blurb:'Load her up, keep her level', color:'#e8a33a', cat:'physics'},
+    {id:'tidepool', name:'Tidepool', blurb:'Send the tide, settle every creature', color:'#3fb8c4', cat:'puzzle'},
+    {id:'kite', name:'Kite', blurb:'Ride the gusts, mind the line', color:'#ff7a59', cat:'reflex'},
+    {id:'neon-pour', name:'Neon Pour', blurb:'Pour the light, sort every colour', color:'#c86bff', cat:'puzzle'},
+    {id:'neon-bolts', name:'Neon Bolts', blurb:'Spin the nuts, light every bolt', color:'#3ee0c5', cat:'puzzle'},
+    {id:'pottery', name:'Pottery', blurb:'Throw it, fire it, put it on the shelf', color:'#d9733f', cat:'calm'},
+  ];
+  // shelf tabs, in the order they appear
+  const CATS = [{id:'puzzle', name:'Puzzle'}, {id:'reflex', name:'Reflex'}, {id:'calm', name:'Calm'}, {id:'physics', name:'Build'}];
+  const byId = Object.fromEntries(GAMES.map(g => [g.id, g]));
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const dayNum = s => Math.round(new Date(s + 'T12:00:00').getTime() / 864e5);
+
+  let S;
+  function load(){
+    try { S = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ S = null; }
+    S = Object.assign({xp:0, runs:{}, best:{}, played:0, streak:{last:'', days:0}, daily:null, last:null, noads:false, seen:false}, S || {});
+  }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+  load();
+
+  // levels: each one asks a little more than the last
+  const need = L => 100 + (L - 1) * 40;
+  function level(){ let L = 1, x = S.xp; while (x >= need(L)){ x -= need(L); L++; } return {level:L, into:x, need:need(L)}; }
+
+  // three missions a day, from three different games, the same for the whole day
+  function rng(seed){ let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function daily(){
+    const d = today();
+    if (S.daily && S.daily.date === d) return S.daily;
+    const R = rng(dayNum(d) * 7919), pool = GAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const list = pool.slice(0, 3).map((g, i) => {
+      const best = S.best[g.id] || 0, kind = i === 0 ? 'play' : best > 0 && R() < .6 ? 'score' : i === 2 ? 'best' : 'play';
+      if (kind === 'score') return {game:g.id, kind, target:Math.max(1, Math.round(best * (.45 + R() * .2))), prog:0, done:false};
+      if (kind === 'best') return {game:g.id, kind, target:1, prog:0, done:false};
+      return {game:g.id, kind:'play', target:2 + Math.floor(R() * 2), prog:0, done:false};
+    });
+    S.daily = {date:d, list, bonus:false}; save(); return S.daily;
+  }
+  const missionText = m => { const n = byId[m.game].name;
+    return m.kind === 'play' ? `Play ${m.target} rounds of ${n}` : m.kind === 'score' ? `Score ${m.target.toLocaleString('en-US')} in ${n}` : `Beat your best in ${n}`; };
+
+  // a finished round from any game: XP, missions, streak
+  function report(game, r){
+    r = r || {}; const score = +r.score || 0, newBest = !!r.newBest;
+    S.runs[game] = (S.runs[game] || 0) + 1; S.played++; S.last = game;
+    if (score > (S.best[game] || 0)) S.best[game] = score;
+    const before = level().level; let gain = 20 + (newBest ? 25 : 0); const done = [];
+    for (const m of daily().list){ if (m.done || m.game !== game) continue;
+      if (m.kind === 'play') m.prog++; else if (m.kind === 'score') m.prog = Math.max(m.prog, score); else if (newBest) m.prog = 1;
+      if (m.prog >= m.target){ m.done = true; gain += 100; done.push(missionText(m)); } }
+    if (!S.daily.bonus && S.daily.list.every(m => m.done)){ S.daily.bonus = true; gain += 150; done.push('All three missions'); }
+    // a day with at least one finished round keeps the streak going
+    const d = today(); if (S.streak.last !== d){ S.streak.days = S.streak.last && dayNum(d) - dayNum(S.streak.last) === 1 ? S.streak.days + 1 : 1; S.streak.last = d; }
+    S.xp += gain; save();
+    const after = level().level;
+    return {gain, done, levelUp:after > before ? after : 0};
+  }
+  const streak = () => { const d = today(); return S.streak.last && dayNum(d) - dayNum(S.streak.last) <= 1 ? S.streak.days : 0; };
+  return {GAMES, CATS, byId, get state(){ return S; }, level, daily, missionText, report, streak, save, reload:load};
+})();
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Paper Echo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Figtree:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* A paper diorama at night: cut-paper mountains in mist, a still lake, lanterns on a string.
+   UI pieces are paper tags laid on the scene; the lit lantern is the loud thing. */
+:root{--ink:#1d2a2c;--ink2:#4a5a5c;--paper:#fdfcf8;--paper-edge:#e4e1d6;--mustard:#f2b632;--mustard-edge:#c98d12;--coral:#ef6f5e;--sage:#7fb38a;
+  --head:'Fraunces',Georgia,serif;--ui:'Figtree',system-ui,sans-serif;--st:var(--safe-top,env(safe-area-inset-top,0px));--sb:var(--safe-bottom,env(safe-area-inset-bottom,0px))}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:#0f1630;color:var(--ink);font-family:var(--ui);user-select:none;-webkit-user-select:none;touch-action:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+button{font:inherit;color:inherit;border:0;cursor:pointer;background:none;padding:0}
+button:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+/* paper tags */
+.tag{background:var(--paper);border-radius:6px;box-shadow:0 1px 0 var(--paper-edge),0 6px 14px rgba(20,35,40,.18)}
+.key{height:52px;min-width:52px;padding:0 18px;border-radius:8px;display:inline-grid;place-items:center;background:var(--paper);box-shadow:0 3px 0 var(--paper-edge),0 8px 16px rgba(20,35,40,.16);font-weight:700;font-size:16px;transition:transform .08s,box-shadow .08s}
+.key:active{transform:translateY(2px);box-shadow:0 1px 0 var(--paper-edge),0 3px 8px rgba(20,35,40,.16)}
+.key svg{width:22px;height:22px;fill:none;stroke:var(--ink);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.key.primary{background:var(--mustard);box-shadow:0 3px 0 var(--mustard-edge),0 8px 16px rgba(120,80,0,.25);font-family:var(--head);font-weight:800;font-size:20px;padding:0 30px}
+.key.primary:active{box-shadow:0 1px 0 var(--mustard-edge)}
+.key.small{height:42px;min-width:42px;padding:0}
+.key.small svg{width:19px;height:19px}
+#soundBtn.off svg .wave,#homeSound.off svg .wave{display:none}#soundBtn svg .x,#homeSound svg .x{display:none}#soundBtn.off svg .x,#homeSound.off svg .x{display:inline}
+
+/* HUD: one paper strip at the top */
+#hud{position:fixed;left:0;right:0;top:calc(var(--st) + 10px);display:flex;justify-content:center;z-index:2;pointer-events:none}
+.strip{width:min(460px,calc(100vw - 24px));display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:8px 12px 8px 8px;transform:rotate(-.6deg)}
+.strip .key{pointer-events:auto}
+.strip .mid{display:grid;line-height:1.05;min-width:0}
+.strip .mid small{font-size:13px;font-weight:600;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .mid b{font-family:var(--head);font-weight:800;font-size:30px;font-variant-numeric:tabular-nums}
+.sc{display:flex;align-items:baseline;gap:8px}
+#combo{font-style:normal;font-size:14px;font-weight:700;color:#b3700a;opacity:0;transition:opacity .3s}
+#combo.on{opacity:1}
+.strip .right{display:grid;justify-items:end;gap:4px}
+.strip .right small{font-size:13px;color:var(--ink2);font-weight:600}
+.strip .right small b{color:var(--ink);font-family:var(--head);font-size:16px;margin-left:3px}
+#lives{display:flex;gap:3px}
+#lives svg{width:22px;height:22px}
+#lives svg.gone{opacity:.22}
+/* who's turn it is: a small paper label that swaps text */
+#cue{position:fixed;left:50%;top:calc(var(--st) + 92px);transform:translateX(-50%) rotate(1deg);z-index:2;padding:8px 16px;font-family:var(--head);font-weight:600;font-size:19px;white-space:nowrap;transition:opacity .25s}
+#cue.you{background:var(--mustard);box-shadow:0 2px 0 var(--mustard-edge),0 6px 14px rgba(120,80,0,.25)}
+
+/* sheets */
+#overlay,#pause,#coach,#collect{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(20,35,40,.35);animation:fade .25s}
+@keyframes fade{from{opacity:0}}
+.card{width:min(460px,100%);max-height:calc(100vh - 28px - var(--sb));overflow-y:auto;background:var(--paper);border-radius:10px;padding:22px 20px 18px;display:grid;gap:16px;box-shadow:0 2px 0 var(--paper-edge),0 18px 40px rgba(20,35,40,.3);animation:unfold .45s cubic-bezier(.2,1.3,.4,1);transform-origin:50% 100%;scrollbar-width:none}
+@keyframes unfold{from{transform:perspective(700px) rotateX(70deg);opacity:0}}
+.card h2{margin:0;font-family:var(--head);font-weight:800;font-size:32px;line-height:1.05}
+.card .sub{margin:-10px 0 0;font-size:15px;color:var(--ink2)}
+.card .sub.nb{color:#b3700a;font-weight:700}
+.card .unl{margin:-6px 0 0;padding:8px 12px;border-radius:8px;background:#fbf3dc;font-size:14px;font-weight:700;color:#8a5a06}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border-radius:8px;background:#f1efe7;padding:12px 4px}
+.stats div{text-align:center}
+.stats div + div{border-left:1px dashed #cfcabb}
+.stats small{display:block;font-size:12px;color:var(--ink2);font-weight:600}
+.stats b{font-family:var(--head);font-weight:800;font-size:24px}
+.row{display:flex;gap:10px}.row .key{flex:1}
+.coach{display:grid;gap:12px}
+.coach div{display:grid;grid-template-columns:44px 1fr;gap:12px;align-items:center}
+.coach i{width:44px;height:44px;border-radius:8px;background:#f1efe7;display:grid;place-items:center}
+.coach i svg{width:24px;height:24px;fill:none;stroke:var(--coral);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.coach b{display:block;font-weight:700;font-size:15px}
+.coach p{margin:1px 0 0;font-size:14px;color:var(--ink2)}
+.banner{position:fixed;left:50%;top:calc(var(--st) + 140px);z-index:3;transform:translateX(-50%);width:max-content;max-width:calc(100vw - 40px);padding:10px 22px;text-align:center;pointer-events:none;animation:bann var(--bd,2.4s) ease forwards}
+.banner small{display:block;font-size:13px;font-weight:600;color:var(--ink2)}
+.banner b{display:block;font-family:var(--head);font-weight:800;font-size:27px;line-height:1.1}
+.banner em{display:block;font-style:normal;font-size:13px;font-weight:600;color:#b3700a;margin-top:3px}
+@keyframes bann{0%{opacity:0;transform:translateX(-50%) perspective(600px) rotateX(80deg)}12%{opacity:1;transform:translateX(-50%) rotate(-1.5deg)}84%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-10px)}}
+/* collection */
+#collect .card{gap:12px}
+.sect > small{display:block;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);margin-bottom:7px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.tiles.two{grid-template-columns:repeat(2,1fr)}
+.tile{position:relative;border-radius:8px;background:#f1efe7;padding:5px 5px 6px;display:grid;justify-items:center;gap:4px;font-size:13px;font-weight:700;box-shadow:inset 0 0 0 2px transparent;transition:box-shadow .15s,background .15s;min-width:0}
+.tile canvas{width:100%;height:58px;display:block;border-radius:5px}
+.tiles.two .tile canvas{height:62px}
+.tile span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.tile.on{box-shadow:inset 0 0 0 2.5px var(--mustard-edge);background:#fbf3dc}
+.tile.lock{color:var(--ink2)}.tile.lock canvas{opacity:.4;filter:grayscale(.9)}
+.tile .lk{position:absolute;top:9px;right:9px;width:20px;height:20px;border-radius:5px;background:var(--paper);display:grid;place-items:center}
+.tile .lk svg{width:13px;height:13px;fill:none;stroke:var(--ink);stroke-width:2.4;stroke-linecap:round}
+.hint{margin:0;font-size:14px;color:var(--ink2);min-height:19px}
+.hint b{color:var(--ink)}
+
+/* splash + wordmark: cut-paper letters that pop up like a book opening */
+#splash{position:fixed;inset:0;z-index:20;background:linear-gradient(#0f1630,#2c3263);display:grid;place-items:center;transition:opacity .5s}
+#splash.out{opacity:0;pointer-events:none}
+.mark{display:grid;justify-items:center;gap:22px}
+.word{display:grid;justify-items:center;line-height:.9}
+.word .w1,.word .w2{display:flex;gap:2px}
+.word span i{font-style:normal;display:inline-block;font-family:var(--head);font-weight:800;font-size:66px;color:var(--paper);text-shadow:0 3px 0 rgba(0,0,0,.12),2px 6px 10px rgba(20,35,40,.25);transform-origin:50% 100%}
+.word .w2 i{font-size:82px}
+.word .w1 i{color:#efe9da}.word .w2 i{text-shadow:0 0 18px currentColor,0 3px 0 rgba(0,0,0,.25)}.word .w2 i:nth-child(1){color:#e8714f}.word .w2 i:nth-child(2){color:#ecb04c}.word .w2 i:nth-child(3){color:#5fb39a}.word .w2 i:nth-child(4){color:#7b93d4}
+#splash .word i{animation:popup .55s cubic-bezier(.2,1.4,.4,1) both}
+#splash .word .w1 i:nth-child(2){animation-delay:.05s}#splash .word .w1 i:nth-child(3){animation-delay:.1s}#splash .word .w1 i:nth-child(4){animation-delay:.15s}#splash .word .w1 i:nth-child(5){animation-delay:.2s}
+#splash .word .w2 i:nth-child(1){animation-delay:.3s}#splash .word .w2 i:nth-child(2){animation-delay:.36s}#splash .word .w2 i:nth-child(3){animation-delay:.42s}#splash .word .w2 i:nth-child(4){animation-delay:.48s}
+@keyframes popup{from{transform:perspective(500px) rotateX(-95deg);opacity:0}}
+.pbar{width:170px;height:6px;border-radius:3px;background:rgba(255,255,255,.18);overflow:hidden}
+.pbar i{display:block;height:100%;width:0;background:#ecb04c;border-radius:3px;transition:width .3s}
+
+/* home */
+#home{position:fixed;inset:0;z-index:4;display:grid;grid-template-rows:auto auto 1fr auto;padding:calc(var(--st) + 10px) 0 calc(var(--sb) + 22px)}
+#homeTop{display:flex;justify-content:space-between;gap:8px;padding:0 16px;min-height:44px}
+#homeTop .key{height:44px;min-width:44px;padding:0 12px}
+#collectBtn{display:inline-flex;gap:7px;align-items:center;position:relative;font-size:15px}
+#collectBtn .dot{position:absolute;top:-3px;right:-3px;width:11px;height:11px;border-radius:6px;background:var(--coral);box-shadow:0 0 0 2px var(--paper)}
+#home .word{margin-top:6px}
+#home .tagline{justify-self:center;margin-top:16px;padding:6px 14px;font-weight:600;font-size:15px;transform:rotate(-1deg)}
+#shelf{align-self:center;display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;padding:18px calc(50vw - 115px) 22px;scrollbar-width:none;touch-action:pan-x}
+#shelf::-webkit-scrollbar{display:none}
+.mcard{flex:0 0 230px;scroll-snap-align:center;border-radius:10px;padding:14px;background:var(--paper);box-shadow:0 2px 0 var(--paper-edge),0 12px 24px rgba(20,35,40,.2);text-align:left;display:grid;gap:8px;transition:transform .25s,opacity .25s;opacity:.6;transform:scale(.92) rotate(1deg)}
+.mcard.on{opacity:1;transform:rotate(-1deg)}
+.mcard .art{height:110px;border-radius:6px;overflow:hidden}
+.mcard .art canvas{display:block;width:100%;height:100%}
+.mcard b{font-family:var(--head);font-weight:800;font-size:22px}
+.mcard p{margin:-4px 0 0;font-size:14px;color:var(--ink2);line-height:1.35;min-height:38px}
+.mcard .meta{font-size:13px;color:var(--ink2);font-weight:600;white-space:nowrap}
+.mcard .meta b{font-size:17px;color:var(--ink);margin-left:4px}
+.mcard .meta i{font-style:normal;margin:0 6px;color:#b8b2a2}
+.mcard .meta .ok{color:#3f8a5a}
+#dots{display:flex;justify-content:center;gap:7px;margin-top:-6px}
+#dots i{width:7px;height:7px;border-radius:4px;background:rgba(255,255,255,.3);transition:width .2s,background .2s}
+#dots i.on{width:20px;background:#ecb04c}
+#home .bottomset{width:min(420px,calc(100% - 32px));justify-self:center}
+#playBtn{height:64px;font-size:26px;width:100%}
+@media (max-height:700px){ .word span i{font-size:52px}.word .w2 i{font-size:64px} #home .tagline{display:none} .mcard{flex-basis:190px}.mcard p{display:none}.mcard .art{height:84px} #shelf{padding:10px calc(50vw - 95px) 14px} #playBtn{height:54px;font-size:22px} .mcard .meta{font-size:12px}.mcard .meta b{font-size:15px} }
+@media (max-height:600px){ .card{padding:16px 16px 14px;gap:12px}.card h2{font-size:26px} .tile canvas{height:46px}.tiles.two .tile canvas{height:48px} #cue{top:calc(var(--st) + 84px)} }
+@media (max-height:520px){ .word .w1{display:none} }
+@media (max-width:350px){ #collectBtn span{display:none} .strip .mid b{font-size:26px} }
+/* ===== tablets: iPad portrait and landscape, Split View / Stage Manager windows from 600x700 up. Phones never match these
+   queries (--z stays 1), so their layout is untouched. Each UI layer is laid out in a smaller virtual box (its real size / --z)
+   and scaled up by --z, so keys, cards and text grow together; the playfield canvas keeps full resolution and resize() frames it. */
+:root{--z:1}
+@media (min-width:600px) and (min-height:800px){:root{--z:1.15}}
+@media (min-width:740px) and (min-height:900px){:root{--z:1.25}}
+@media (min-width:800px) and (min-height:1100px){:root{--z:1.35}}
+@media (min-width:1000px) and (min-height:1300px){:root{--z:1.5}}
+@media (min-width:900px) and (min-height:700px) and (orientation:landscape){:root{--z:1.1}}
+@media (min-width:1200px) and (min-height:950px) and (orientation:landscape){:root{--z:1.3}}
+@media (min-width:600px) and (min-height:700px){
+  #home,#overlay,#pause,#coach,#collect,#iosSheet{right:auto;bottom:auto;width:calc(100% / var(--z));height:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #hud{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #overlay,#pause,#coach,#collect,#iosSheet{place-items:center}
+  .card{max-height:calc(100vh / var(--z) - 28px - var(--sb))}
+  #splash .mark{transform:scale(var(--z))}
+  .strip{width:min(460px,calc(100% - 24px))}
+  #shelf{padding-left:calc(50% - 115px);padding-right:calc(50% - 115px)}
+  #cue{top:calc(var(--st) + 92px * var(--z));transform:translateX(-50%) rotate(1deg) scale(var(--z));transform-origin:50% 0}
+  .banner{top:calc(var(--st) + 140px * var(--z));padding:calc(10px * var(--z)) calc(22px * var(--z))}
+  .banner small,.banner em{font-size:calc(13px * var(--z))}.banner b{font-size:calc(27px * var(--z))}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition-duration:.01s!important}}
+</style>
+</head>
+<body>
+<div id="splash" role="status" aria-label="Loading"><div class="mark">
+  <div class="word"><span class="w1"><i>P</i><i>a</i><i>p</i><i>e</i><i>r</i></span><span class="w2"><i>E</i><i>c</i><i>h</i><i>o</i></span></div>
+  <span class="pbar"><i id="splashBar"></i></span>
+</div></div>
+<div id="stage"></div>
+<div id="home" hidden>
+  <div id="homeTop">
+    <button class="key" id="collectBtn" aria-label="Lanterns and scenes"><svg viewBox="0 0 24 24"><path d="M12 2v2.5M8.5 4.5h7"/><path d="M8 6.5c-2.6 2.8-2.6 8.2 0 11h8c2.6-2.8 2.6-8.2 0-11z"/><path d="M12 6.5v11"/><path d="M9.5 17.5v2h5v-2M12 19.5V22"/></svg><span>Collection</span><i class="dot" hidden></i></button>
+    <button class="key" id="homeSound" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+  </div>
+  <div style="display:grid;justify-items:center"><div class="word"><span class="w1"><i>P</i><i>a</i><i>p</i><i>e</i><i>r</i></span><span class="w2"><i>E</i><i>c</i><i>h</i><i>o</i></span></div><span class="tag tagline">Light the lanterns, play the tune back</span></div>
+  <div style="display:grid;align-content:center"><div id="shelf"></div><div id="dots"></div></div>
+  <div class="bottomset"><button class="key primary" id="playBtn">Play</button></div>
+</div>
+<div id="hud"><div class="strip tag">
+  <button class="key small" id="pauseBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg></button>
+  <span class="mid"><small id="modeName">Classic</small><span class="sc"><b id="score">0</b><em id="combo"></em></span></span>
+  <span class="right"><span id="lives"></span><small>Best<b id="best">0</b></small></span>
+</div></div>
+<div id="cue" class="tag">Listen</div>
+<div id="pause" hidden><div class="card">
+  <h2>Paused</h2>
+  <div class="stats" id="pStats"></div>
+  <div class="row"><button class="key" id="pRestart">Restart</button><button class="key primary" id="pResume">Resume</button></div>
+  <div class="row"><button class="key" id="pHome">Main menu</button><button class="key" id="pHelp">How to play</button>
+    <button class="key" id="soundBtn" aria-label="Sound" style="flex:0 0 52px"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button></div>
+</div></div>
+<div id="coach" hidden><div class="card">
+  <h2>How to play</h2>
+  <div class="coach">
+    <div><i><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></i><span><b>Listen</b><p>The lanterns sound a short tune, one at a time. Low notes on the left, high on the right.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M9 11V5a2 2 0 0 1 4 0v6"/><path d="M13 9a2 2 0 0 1 4 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-2-4a1.5 1.5 0 0 1 2.6-1.5L7 13"/></svg></i><span><b>Play it back</b><p>Tap the lanterns in the same order. Keep the rhythm for an "in time" bonus.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M12 2c1 4 6 6 6 12a6 6 0 0 1-12 0c0-3 2-5 3-7 0 3 1 4 2 4 0-3-1-6 1-9z"/></svg></i><span><b>Three flames</b><p>A wrong lantern costs a flame and the tune plays again. Clean rounds build a multiplier.</p></span></div>
+  </div>
+  <button class="key primary" id="coachOk">Got it</button>
+</div></div>
+<div id="overlay" hidden><div class="card">
+  <h2 id="ovTitle">The lanterns went dark</h2>
+  <p class="sub" id="ovSub"></p>
+  <div class="stats" id="ovStats"></div>
+  <p class="unl" id="ovUnl" hidden></p>
+  <div class="row"><button class="key primary" id="ovNew">Play again</button></div>
+  <div class="row" id="ovRow2"><button class="key" id="ovModes">Main menu</button></div>
+</div></div>
+<div id="collect" hidden><div class="card">
+  <h2>Lanterns &amp; scenes</h2>
+  <p class="sub" id="cSub"></p>
+  <div class="sect"><small>Lantern</small><div class="tiles" id="cStyles"></div></div>
+  <div class="sect"><small>Scene</small><div class="tiles two" id="cScenes"></div></div>
+  <p class="hint" id="cHint"></p>
+  <button class="key primary" id="cDone">Done</button>
+</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>window.PLATFORM = {name:'web'};
+</script>
+<script>
+(() => {
+'use strict';
+const SAVE = 'paper-echo-v1';
+const MODES = {
+  classic:{name:'Classic',   desc:'The tune grows one note each round. Three flames.', lives:3, gap:.66, kind:'grow'},
+  melody: {name:'Melody',    desc:'Old tunes, learned phrase by phrase. Can you name them?', lives:3, kind:'melody'},
+  daily:  {name:'Daily',     desc:'A new tune each day, the same for everyone.', lives:3, kind:'daily'},
+  reverse:{name:'Backwards', desc:'Hear it forwards, play it back to front.', lives:3, gap:.7, reverse:true, kind:'grow'},
+  zen:    {name:'Zen',       desc:'Slow and quiet. No flames to lose.', lives:Infinity, gap:.9, zen:true, kind:'grow'},
+};
+const MODE_IDS = Object.keys(MODES);
+let mode = 'classic', M = MODES.classic;
+const PLATFORM = window.PLATFORM || {name:'web'};
+const $ = id => document.getElementById(id);
+const UIZ = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--z')) || 1;   // tablet UI scale (1 on phones)
+const L_ = h => new THREE.Color(h).convertSRGBToLinear();
+// lanterns, low to high. Classic plays a pentatonic scale so any tune sounds settled; Melody retunes them per song.
+const LAMPS = [{col:'#d9583b'}, {col:'#e6a23c'}, {col:'#4f9a85'}, {col:'#5873b8'}, {col:'#9a64ad'}, {col:'#d77a8f'}, {col:'#e3d3ad'}];
+const LAMP_NAMES = ['Vermilion', 'Saffron', 'Jade', 'Indigo', 'Plum', 'Rose', 'Ivory'];
+const PENTA = [0, 2, 4, 7, 9, 12, 14];
+let lampNote = PENTA.slice();
+
+function seeded(str){ let h = 1779033703 ^ str.length; for (let i = 0; i < str.length; i++){ h = Math.imul(h ^ str.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  return () => { h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909); h ^= h >>> 16; return (h >>> 0) / 4294967296; }; }
+
+// ================= tunes (public domain). Phrases split by |, notes as C4..B4 by default, :n = beats =================
+const TUNES = [
+  {id:'twinkle', name:'Twinkle, Twinkle, Little Star', by:'French folk song', beat:.42, src:'C C G G A A G:2 | F F E E D D C:2 | G G F F E E D:2 | G G F F E E D:2 | C C G G A A G:2 | F F E E D D C:2'},
+  {id:'ode',     name:'Ode to Joy', by:'Beethoven', beat:.4, src:'E E F G G F E D | C C D E E:1.5 D:.5 D:2 | E E F G G F E D | C C D E D:1.5 C:.5 C:2'},
+  {id:'frere',   name:'Frère Jacques', by:'French round', beat:.4, src:'C D E C C D E C | E F G:2 E F G:2 | G:.5 A:.5 G:.5 F:.5 E C | G:.5 A:.5 G:.5 F:.5 E C | C G3 C:2 C G3 C:2'},
+  {id:'largo',   name:'Going Home', by:'Dvořák, New World Symphony', beat:.46, src:'E:1.5 G:.5 G:2 E:1.5 D:.5 C:2 | D E G E D:3 | E:1.5 G:.5 G:2 E:1.5 D:.5 C:2 | D E D C C:3'},
+  {id:'grace',   name:'Amazing Grace', by:'American hymn', beat:.4, src:'G3 C:2 E:.5 C:.5 E:2 D | C:2 A3 G3:2 G3 | C:2 E:.5 C:.5 E:2 D G:3 | E G:2 E:.5 G:.5 E C:2 G3 | A3:2 C:.5 C:.5 A3 G3:2 G3 | C:2 E:.5 C:.5 E:2 D C:3'},
+  {id:'sakura',  name:'Sakura, Sakura', by:'Japanese folk song', beat:.44, src:'A A B:2 A A B:2 | A B C5 B A B:.5 A:.5 F:2 | E C E F E E:.5 C:.5 B3:2 | A B C5 B A B:.5 A:.5 F:2 | E C E F E E:.5 C:.5 B3:2 | A A B:2 A A B:2 | E F B:.5 A:.5 F E:3'},
+  {id:'brahms',  name:'Lullaby', by:'Brahms', beat:.42, src:'E:.5 E:.5 G:2 E:.5 E:.5 G:2 | E:.5 G:.5 C5 B:1.5 A:.5 A G | D:.5 E:.5 F D D:.5 E:.5 F:2 | D:.5 F:.5 B:.5 A:.5 G B C5:2'},
+  {id:'morning', name:'Morning Mood', by:'Grieg, Peer Gynt', beat:.4, src:'G E:.5 D:.5 C:.5 D:.5 E | G E:.5 D:.5 C:.5 D:.5 E:.5 D:.5 E | G E:.5 G:.5 A E:.5 A:.5 | G:.5 E:.5 D:.5 C:2'},
+  {id:'silent',  name:'Silent Night', by:'Gruber', beat:.36, src:'G:1.5 A:.5 G E:3 | G:1.5 A:.5 G E:3 | D5:2 D5 B:3 | C5:2 C5 G:3 | A:2 A C5:1.5 B:.5 A | G:1.5 A:.5 G E:3'},
+  {id:'swan',    name:'Swan Lake', by:'Tchaikovsky', beat:.4, src:'F#5:3 B C#5 D5 E5 | F#5:2 D5 F#5:2 D5 | F#5:2 B D5:.5 B:.5 G:.5 D5:.5 B:3'},
+  {id:'canon',   name:'Canon in D', by:'Pachelbel', beat:.38, src:'D5:2 A:2 B:2 F#:2 | G:2 D:2 G:2 A:2 | D5:2 A:2 B:2 F#:2 | G:2 D:2 G:2 A:2'},
+];
+const NOTE_ST = {C:0, D:2, E:4, F:5, G:7, A:9, B:11};
+const PARSED = TUNES.map(t => {
+  const raw = t.src.split('|').map(p => p.trim().split(/\s+/).map(tok => { const m = /^([A-G])(#|b)?(\d)?(?::([\d.]+))?$/.exec(tok); if (!m) throw new Error('bad note ' + tok);
+    return {st:NOTE_ST[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + ((m[3] ? +m[3] : 4) - 4) * 12, d:m[4] ? +m[4] : 1}; }));
+  const pitches = [...new Set(raw.flat().map(n => n.st))].sort((a, b) => a - b);
+  if (pitches.length > 7) console.warn('tune needs more than 7 lanterns', t.id);
+  return Object.assign({}, t, {pitches:pitches.map(p => p - pitches[0] - 2), phrases:raw.map(ph => ph.map(n => ({lamp:pitches.indexOf(n.st), d:n.d})))});
+});
+function melSegs(tn){ const segs = [], seen = new Set();
+  tn.phrases.forEach((ph, p) => { const key = ph.map(n => n.lamp + ':' + n.d).join(',');
+    if (seen.has(key) || ph.length < 6) segs.push({p, len:ph.length}); else segs.push({p, len:Math.ceil(ph.length / 2)}, {p, len:ph.length}); seen.add(key); });
+  return segs; }
+
+// ================= the daily tune: same seed for everyone on a calendar day =================
+const dayKey = (d = new Date()) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+const yesterdayKey = () => { const d = new Date(); d.setDate(d.getDate() - 1); return dayKey(d); };
+const D_NOUN = ['Heron', 'Ferry', 'Willow', 'Temple Bell', 'Crane', 'Moth', 'Reed Cutter', 'Kite', 'Plum Tree', 'Mooring', 'Night Boat', 'Lantern Maker', 'Pine', 'Fisherman', 'Paper Crane', 'Bridge'];
+const D_WHERE = ['at Dusk', 'in the Mist', 'by the Shore', 'after Rain', 'at Midnight', 'in Moonlight', 'on Still Water', 'before Dawn', 'in the Reeds', 'under Stars', 'in First Snow', 'on the Far Bank'];
+function makeDaily(key){
+  const R = seeded('paper-echo/' + key), ri = n => Math.floor(R() * n), pick = a => a[ri(a.length)], N = 5;
+  const walk = (start, len) => { const out = [start]; while (out.length < len){ const p = out[out.length - 1]; let n, k = 0;
+    do { n = Math.max(0, Math.min(N - 1, p + pick([-2, -1, -1, 0, 1, 1, 2]))); } while (++k < 20 && out.length >= 2 && n === p && out[out.length - 2] === p); out.push(n); } return out; };
+  const A = walk(ri(3), 4), B = A.slice(0, 2).concat(walk(A[1], 3).slice(1)), C = walk(Math.min(N - 1, 2 + ri(3)), 4), D = A.slice(0, 2).concat([pick([1, 2]), 0]);
+  const RH = [[1, 1, 1, 1], [1, .5, .5, 2], [.5, .5, 1, 2], [1.5, .5, 1, 1], [1, 1, .5, .5], [.5, .5, .5, .5], [1, .5, .5, 1]];
+  const rA = pick(RH), rC = pick(RH), rD = [1, 1, 1, 2];
+  const notes = [...A.map((l, i) => ({lamp:l, d:rA[i]})), ...B.map((l, i) => ({lamp:l, d:rA[i]})), ...C.map((l, i) => ({lamp:l, d:rC[i]})), ...D.map((l, i) => ({lamp:l, d:rD[i]}))];
+  return {key, notes, beat:.42, name:'The ' + pick(D_NOUN) + ' ' + pick(D_WHERE)};
+}
+
+// ================= unlockables =================
+const STYLES = [
+  {id:'round', name:'Round', label:'Round lanterns'},
+  {id:'tall',  name:'Tall',  label:'Tall lanterns',  req:{t:'best', n:10, text:'reach 10 notes in one game'}},
+  {id:'star',  name:'Star',  label:'Star lanterns',  req:{t:'tunes', n:3, text:'finish 3 melodies'}},
+  {id:'lotus', name:'Lotus', label:'Lotus lanterns', req:{t:'notes', n:500, text:'play 500 notes in total'}},
+];
+const SCENES = [
+  {id:'lake',   name:'Lantern lake', label:'Lantern lake'},
+  {id:'bamboo', name:'Bamboo grove', label:'Bamboo grove', req:{t:'best', n:15, text:'reach 15 notes in one game'}},
+  {id:'temple', name:'Mountain temple', label:'Mountain temple', req:{t:'daily', n:3, text:'finish 3 daily tunes'}},
+  {id:'snow',   name:'Snowy pass', label:'Snowy pass', req:{t:'tunes', n:7, text:'finish 7 melodies'}},
+];
+
+// ================= state =================
+let seq = [], seqT = [], step = 0, phase = 'idle', phaseT = 0, showI = 0, tuneI = 0, lives = 3, over = false, paused = false, adOpen = false, continued = false, now = 0, shake = 0, sound = true;
+let score = 0, combo = 0, startHi = 0, runTunes = 0, taps = [], roundClean = true, daily = null, mel = null, sparkleT = -1e9, sceneId = 'lake', styleId = 'round', won = false;
+let store = {sound:true, mode:'classic', best:{}, seen:false};
+try { const s = JSON.parse(localStorage.getItem(SAVE) || 'null'); if (s && typeof s === 'object') store = Object.assign(store, s); } catch(e){}
+if (!store.best || typeof store.best !== 'object') store.best = {};
+store.hi = store.hi && typeof store.hi === 'object' ? store.hi : {};
+store.notes = +store.notes || 0; store.tunes = Array.isArray(store.tunes) ? store.tunes : []; store.mAt = +store.mAt || 0;
+store.daily = store.daily && typeof store.daily === 'object' ? store.daily : {last:'', streak:0, done:0};
+store.unl = Array.isArray(store.unl) ? store.unl : [];
+sound = store.sound !== false;
+const persist = () => { try { store.sound = sound; store.mode = mode; store.style = styleId; store.scene = sceneId; localStorage.setItem(SAVE, JSON.stringify(store)); } catch(e){} };
+const bestOf = id => store.best[id] || 0;
+const hiOf = id => store.hi[id] || 0;
+const bestNotes = () => Math.max(bestOf('classic'), bestOf('reverse'), bestOf('zen'), bestOf('daily'));
+const dailyStreak = () => (store.daily.last === dayKey() || store.daily.last === yesterdayKey()) ? store.daily.streak || 0 : 0;
+const progressOf = r => r.t === 'best' ? bestNotes() : r.t === 'tunes' ? store.tunes.length : r.t === 'notes' ? store.notes : (store.daily.done || 0);
+const isOpen = it => !it.req || progressOf(it.req) >= it.req.n;
+function checkUnlocks(){ const fresh = [];
+  for (const it of [...STYLES, ...SCENES]) if (it.req && isOpen(it) && !store.unl.includes(it.id)){ store.unl.push(it.id); fresh.push(it.label); }
+  if (fresh.length) store.newUnl = true; return fresh; }
+
+// ================= renderer =================
+const host = $('stage');
+const MOBILE = matchMedia('(pointer:coarse)').matches;
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, MOBILE ? 2.5 : 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+host.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, 1, .5, 100); camera.position.set(0, 0, 15);
+const camLook = new THREE.Vector3(0, 0, -6);
+function resize(){
+  const W = innerWidth, H = innerHeight; renderer.setSize(W, H); camera.aspect = W / H;
+  const wantW = 6.4, h = 2 * camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  // tablets in landscape: the lantern row may come closer (bigger lanterns), it still sits clear of the HUD
+  camera.zoom = Math.min(UIZ() > 1 && camera.aspect > 1 ? 1.55 : 1.2, (h * camera.aspect) / wantW); camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+// ================= paper =================
+const grain = (() => { const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d'), d = x.createImageData(256, 256);
+  for (let i = 0; i < d.data.length; i += 4){ const v = 228 + Math.random() * 27; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+  x.putImageData(d, 0, 0); x.strokeStyle = 'rgba(255,255,255,.45)'; x.lineWidth = 1;
+  for (let i = 0; i < 70; i++){ x.beginPath(); const a = Math.random() * 256, b = Math.random() * 256; x.moveTo(a, b); x.quadraticCurveTo(a + Math.random() * 20 - 10, b + Math.random() * 20 - 10, a + Math.random() * 30 - 15, b + Math.random() * 30 - 15); x.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(.5, .5); return t; })();
+const glowTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const g = x.createRadialGradient(64, 64, 0, 64, 64, 64); g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(.35, 'rgba(255,255,255,.4)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+const ADD = THREE.AdditiveBlending;
+const paperMat = col => new THREE.MeshStandardMaterial({color:L_(col), map:grain, roughness:1, metalness:0});
+const cut = (shape, depth = .04, seg = 24) => new THREE.ExtrudeGeometry(shape, {depth, bevelEnabled:false, curveSegments:seg});
+function layer(shape, col, z, depth = .04, shadow = true){ const m = new THREE.Mesh(cut(shape, depth), paperMat(col)); m.position.z = z; m.castShadow = m.receiveShadow = shadow; return m; }
+const ellipse = (rx, ry, x = 0, y = 0) => { const s = new THREE.Shape(); s.absellipse(x, y, rx, ry, 0, Math.PI * 2, false, 0); return s; };
+const poly = pts => { const s = new THREE.Shape(); pts.forEach(([x, y], i) => i ? s.lineTo(x, y) : s.moveTo(x, y)); return s; };
+const glow = (col, s, op) => { const g = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_(col), transparent:true, opacity:op, blending:ADD, depthWrite:false})); g.scale.setScalar(s); return g; };
+function mergeGeos(geos){ const parts = geos.map(g => g.index ? g.toNonIndexed() : g); let n = 0; parts.forEach(g => n += g.attributes.position.count);
+  const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), uv = new Float32Array(n * 2); let o = 0;
+  for (const g of parts){ pos.set(g.attributes.position.array, o * 3); nor.set(g.attributes.normal.array, o * 3); uv.set(g.attributes.uv.array, o * 2); o += g.attributes.position.count; }
+  const m = new THREE.BufferGeometry(); m.setAttribute('position', new THREE.BufferAttribute(pos, 3)); m.setAttribute('normal', new THREE.BufferAttribute(nor, 3)); m.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); return m; }
+
+// ================= light: moonlight from the upper left, the lanterns carry their own =================
+const hemi = new THREE.HemisphereLight(0xb8c4ff, 0x20243a, .45); scene.add(hemi);
+const moonLight = new THREE.DirectionalLight(0xc9d4ff, .55); moonLight.position.set(-4, 6, 10); moonLight.castShadow = true;
+moonLight.shadow.mapSize.set(MOBILE ? 1024 : 2048, MOBILE ? 1024 : 2048); Object.assign(moonLight.shadow.camera, {left:-8, right:8, top:9, bottom:-9, near:1, far:40}); moonLight.shadow.radius = 8; moonLight.shadow.bias = -.0005;
+scene.add(moonLight);
+
+// ================= the diorama: sky, moon, mountains in mist, a still lake =================
+const HORIZON = -1.15;
+const skyMat = new THREE.ShaderMaterial({uniforms:{top:{value:new THREE.Color()}, bot:{value:new THREE.Color()}},
+  vertexShader:'varying float vY; void main(){ vY = uv.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:'uniform vec3 top, bot; varying float vY; void main(){ gl_FragColor = vec4(mix(bot, top, smoothstep(.35, 1.0, vY)), 1.0); }'});
+const sky = new THREE.Mesh(new THREE.PlaneGeometry(60, 40), skyMat); sky.position.z = -14; scene.add(sky);
+// a warm (or cold) band of light low on the horizon: dusk, aurora, dawn
+const horizonGlow = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:0xffffff, transparent:true, opacity:0, blending:ADD, depthWrite:false})); horizonGlow.scale.set(26, 5, 1); horizonGlow.position.set(0, HORIZON + .4, -11.5); scene.add(horizonGlow);
+const moon = layer(ellipse(.55, .55), '#f4eedb', -12.6, .04, false); moon.material.emissive = L_('#f4eedb'); scene.add(moon);
+const moonGlow = glow('#cfd8ff', 6, .35); moonGlow.position.z = -12.7; scene.add(moonGlow);
+const sparkle = (() => { const s = new THREE.Shape(); for (let i = 0; i < 8; i++){ const a = i / 8 * Math.PI * 2, r = i % 2 ? .025 : .1; i ? s.lineTo(Math.cos(a) * r, Math.sin(a) * r) : s.moveTo(Math.cos(a) * r, Math.sin(a) * r); } return s; })();
+const sparkleGeo = cut(sparkle, .01, 4), starMat = new THREE.MeshBasicMaterial({color:L_('#f4f0e0')});
+const stars = []; for (let i = 0; i < 34; i++){ const m = new THREE.Mesh(sparkleGeo, starMat); m.position.set((Math.random() - .5) * 16, .8 + Math.random() * 7.5, -12.9); m.userData.tw = Math.random() * 6; m.userData.s = .5 + Math.random() * .9; scene.add(m); stars.push(m); }
+// a field of fine dust stars behind the paper ones (one draw call)
+const dust = (() => { const n = 140, p = new Float32Array(n * 3); for (let i = 0; i < n; i++){ p[i * 3] = (Math.random() - .5) * 22; p[i * 3 + 1] = HORIZON + .5 + Math.random() * 10; p[i * 3 + 2] = -13.2; }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  const m = new THREE.Points(g, new THREE.PointsMaterial({color:0xe8ecff, size:1.6, sizeAttenuation:false, transparent:true, opacity:.5, depthWrite:false})); scene.add(m); return m; })();
+// a shooting star now and then
+const shootTex = (() => { const c = document.createElement('canvas'); c.width = 256; c.height = 16; const x = c.getContext('2d'), g = x.createLinearGradient(0, 0, 256, 0);
+  g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.85, 'rgba(255,255,255,.55)'); g.addColorStop(1, 'rgba(255,255,255,1)'); x.fillStyle = g; x.beginPath(); x.moveTo(0, 8); x.lineTo(250, 4); x.arc(250, 8, 4, -Math.PI / 2, Math.PI / 2); x.lineTo(0, 8); x.fill(); return new THREE.CanvasTexture(c); })();
+const shooter = new THREE.Mesh(new THREE.PlaneGeometry(2.4, .07), new THREE.MeshBasicMaterial({map:shootTex, transparent:true, opacity:0, blending:ADD, depthWrite:false})); shooter.position.z = -12.4; shooter.visible = false; scene.add(shooter);
+const shoot = {t:9, x:0, y:0, dx:0, dy:0};
+function spawnShoot(){ const right = Math.random() < .5, a = right ? -(.3 + Math.random() * .35) : Math.PI + .3 + Math.random() * .35;
+  Object.assign(shoot, {t:0, x:(Math.random() - .5) * 7, y:3.5 + Math.random() * 3.5, dx:Math.cos(a), dy:Math.sin(a)}); shooter.rotation.z = a; shooter.visible = true; }
+// the northern lights: two soft ribbons that only show late in the night
+const aurora = [0, 1].map(i => { const g = new THREE.Mesh(new THREE.PlaneGeometry(16, 2.6, 40, 1), new THREE.MeshBasicMaterial({map:glowTex, color:L_(i ? '#4fd1a5' : '#7be0c3'), transparent:true, opacity:0, blending:ADD, depthWrite:false}));
+  g.position.set(i ? 1.5 : -1, 4.2 + i * .9, -12.3); g.rotation.z = i ? -.15 : .1; g.userData.base = g.geometry.attributes.position.array.slice(); scene.add(g); return g; });
+// mountains: four ridge layers, each lighter as it recedes, with mist laid between them
+function ridge(seed, base, amp, width = 36){
+  const R = (k => () => (k = (k * 9301 + 49297) % 233280) / 233280)(seed * 977 + 13);
+  const pts = [[-width / 2, base]];
+  let x = -width / 2; while (x < width / 2){ const w = .6 + R() * 1.6, h = base + (R() * .8 + .2) * amp; pts.push([x + w * .5, h], [x + w, base + R() * amp * .25]); x += w; }
+  const s = new THREE.Shape(); s.moveTo(-width / 2, HORIZON - .02); pts.forEach(([a, b]) => s.lineTo(a, b)); s.lineTo(width / 2, HORIZON - .02);
+  return {shape:s, pts};
+}
+const RIDGES = [[3, -.2, 2.2, -10], [7, -.5, 1.7, -8], [11, -.75, 1.25, -6], [5, -.95, .8, -4]];
+const ridgeData = RIDGES.map(([seed, base, amp]) => ridge(seed, base, amp));
+const ridges = RIDGES.map(([, , , z], i) => { const m = layer(ridgeData[i].shape, '#2b3460', z, .2); scene.add(m); return m; });
+// mist: soft bands with drifting clumps (each band scrolls its own copy of the texture)
+const mistTex = (() => { const c = document.createElement('canvas'); c.width = 512; c.height = 128; const x = c.getContext('2d');
+  for (let i = 0; i < 26; i++){ const cx = Math.random() * 512, cy = 50 + Math.random() * 40, r = 30 + Math.random() * 70;
+    for (const dx of [-512, 0, 512]){ const g = x.createRadialGradient(cx + dx, cy, 0, cx + dx, cy, r); g.addColorStop(0, 'rgba(255,255,255,.5)'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(cx + dx - r, cy - r, r * 2, r * 2); } }
+  x.globalCompositeOperation = 'source-over'; const v = x.createLinearGradient(0, 0, 0, 128); v.addColorStop(0, 'rgba(255,255,255,0)'); v.addColorStop(.6, 'rgba(255,255,255,.45)'); v.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = v; x.fillRect(0, 0, 512, 128);
+  x.globalCompositeOperation = 'destination-in'; const m = x.createLinearGradient(0, 0, 0, 128); m.addColorStop(0, 'rgba(0,0,0,0)'); m.addColorStop(.55, 'rgba(0,0,0,1)'); m.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = m; x.fillRect(0, 0, 512, 128);
+  const t = new THREE.CanvasTexture(c); t.wrapS = THREE.RepeatWrapping; return t; })();
+const mists = [[-9, .1, 1.8, .006], [-7, -.25, 1.5, -.009], [-5, -.6, 1.3, .013], [-3.2, HORIZON + .05, .9, -.016]].map(([z, y, h, v]) => { const tex = mistTex.clone(); tex.needsUpdate = true; tex.repeat.x = 2.2; tex.offset.x = Math.random();
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(40, h), new THREE.MeshBasicMaterial({map:tex, color:0xc8d0f0, transparent:true, opacity:.22, depthWrite:false})); m.position.set(0, y, z); m.userData.v = v; scene.add(m); return m; });
+// the lake: a flat dark sheet below the horizon with drifting paper ripples
+const waterMat = new THREE.ShaderMaterial({uniforms:{top:{value:new THREE.Color()}, bot:{value:new THREE.Color()}},
+  vertexShader:'varying float vY; void main(){ vY = uv.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:'uniform vec3 top, bot; varying float vY; void main(){ gl_FragColor = vec4(mix(bot, top, vY), 1.0); }'});
+const water = new THREE.Mesh(new THREE.PlaneGeometry(40, 10), waterMat); water.position.set(0, HORIZON - 5, -2.5); scene.add(water);
+const ripples = []; for (let i = 0; i < 9; i++){ const w = .5 + Math.random() * 1.4, s = new THREE.Shape(); s.moveTo(-w, 0); s.quadraticCurveTo(0, .025, w, 0); s.quadraticCurveTo(0, -.012, -w, 0);
+  const m = layer(s, '#8d98c8', -2.3, .005, false); m.position.set((Math.random() - .5) * 9, HORIZON - .25 - i * .42, -2.3); m.userData.v = (.05 + Math.random() * .1) * (Math.random() < .5 ? -1 : 1); scene.add(m); ripples.push(m); }
+// rings spreading where a fish rises
+const ringGeo = new THREE.RingGeometry(.93, 1, 48);
+const rings = Array.from({length:8}, () => { const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({color:L_('#c9d2ff'), transparent:true, opacity:0, blending:ADD, depthWrite:false})); m.visible = false; scene.add(m); return {m, t:9, x:0, y:0, big:1}; });
+function ring(x, y, big = 1){ const r = rings.find(r => r.t > 3) || rings[0]; Object.assign(r, {t:0, x, y, big}); r.m.visible = true; }
+function rise(x, y, big = 1){ ring(x, y, big); setTimeout(() => ring(x, y, big * .75), 380); }
+// a koi gliding just under the surface
+const koi = (() => { const s = new THREE.Shape(); s.moveTo(.32, 0); s.quadraticCurveTo(.24, .1, -.04, .075); s.quadraticCurveTo(-.2, .05, -.27, .01); s.lineTo(-.43, .11); s.lineTo(-.37, 0); s.lineTo(-.43, -.11); s.lineTo(-.27, -.01); s.quadraticCurveTo(-.2, -.05, -.04, -.075); s.quadraticCurveTo(.24, -.1, .32, 0);
+  const m = new THREE.Mesh(new THREE.ShapeGeometry(s, 10), new THREE.MeshBasicMaterial({color:L_('#e07a43'), transparent:true, opacity:0, depthWrite:false})); m.position.z = -2.24; m.visible = false; scene.add(m);
+  return {m, t:0, dur:0, on:false, next:6 + Math.random() * 8}; })();
+// a small boat with a figure and a lantern, drifting across the far water
+const boatLight = glow('#ffc87a', .9, .6);
+const boat = (() => { const g = new THREE.Group(), hull = new THREE.Shape();
+  hull.moveTo(-.55, 0); hull.lineTo(.55, 0); hull.quadraticCurveTo(.42, -.16, .3, -.17); hull.lineTo(-.32, -.17); hull.quadraticCurveTo(-.45, -.16, -.55, 0);
+  const fig = new THREE.Shape(); fig.moveTo(-.1, 0); fig.lineTo(.08, 0); fig.lineTo(.05, .3); fig.absarc(-.01, .37, .065, 0, Math.PI * 2, false); fig.lineTo(-.07, .3);
+  const pole = new THREE.Shape(); pole.moveTo(.12, -.3); pole.lineTo(.15, -.3); pole.lineTo(.45, .55); pole.lineTo(.42, .55);
+  const hook = poly([[-.4, .02], [-.37, .02], [-.37, .42], [-.22, .42], [-.22, .45], [-.4, .45]]);
+  for (const [sh, z] of [[hull, 0], [fig, -.01], [pole, -.02], [hook, -.02]]) g.add(layer(sh, '#151a30', z, .02, false));
+  const lan = new THREE.Mesh(new THREE.BoxGeometry(.09, .11, .06), new THREE.MeshBasicMaterial({color:L_('#ffd69a')})); lan.position.set(-.22, .33, .01); g.add(lan);
+  boatLight.position.set(-.22, .33, .05); g.add(boatLight);
+  g.position.set(-5, HORIZON - .18, -3); g.scale.setScalar(.7); scene.add(g); return g; })();
+const boatRefl = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_('#ffc87a'), transparent:true, opacity:.3, blending:ADD, depthWrite:false})); boatRefl.scale.set(.22, .7, 1); scene.add(boatRefl);
+// near reeds in the corners frame the stage
+const reed = (x, flip) => { const g = new THREE.Group(); for (let i = 0; i < 6; i++){ const s = new THREE.Shape(), h = 1.6 + Math.random() * 1.8, lean = (Math.random() - .3) * .5 * flip;
+  s.moveTo(-.035, 0); s.quadraticCurveTo(lean * .4, h * .6, lean, h); s.quadraticCurveTo(lean * .4 + .05, h * .6, .035, 0); const m = layer(s, i % 2 ? '#26304f' : '#1d2541', 2.6 + i * .02, .02, false); m.position.x = i * .16 * flip; g.add(m); }
+  g.position.set(x, -5.2, 0); g.scale.setScalar(1.6); scene.add(g); return g; };
+const reeds = [reed(-3.6, 1), reed(3.7, -1)];
+// moonlight laid on the water, and a few lily pads with two lotus flowers
+const moonPath = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:0xd8deff, transparent:true, opacity:.16, blending:ADD, depthWrite:false})); moonPath.scale.set(.9, 4.2, 1); moonPath.position.set(2.3, HORIZON - 1.9, -2.4); scene.add(moonPath);
+function pad(x, y, s, a, lotus){
+  const g = new THREE.Group(), sh = new THREE.Shape(); sh.moveTo(0, 0); sh.absellipse(0, 0, .5, .2, .25, Math.PI * 2 - .05, false, 0); sh.lineTo(0, 0);
+  const leaf = layer(sh, '#2c4a4f', 0, .02, false); g.add(leaf);
+  if (lotus){ for (let i = 0; i < 7; i++){ const p = layer(ellipse(.08, .2), i % 2 ? '#e9a7b8' : '#f2c1cd', .03 + (i % 3) * .005, .015, false); p.position.set((i - 3) * .045, .12, 0); p.rotation.z = (i - 3) * .32; g.add(p); }
+    const heart = layer(ellipse(.05, .035), '#f3d27a', .05, .015, false); heart.position.set(0, .05, .05); g.add(heart); }
+  g.position.set(x, y, -.8); g.rotation.z = a; g.scale.setScalar(s); g.userData = {y, p:Math.random() * 6, leaf}; scene.add(g); return g;
+}
+const pads = [pad(-2.7, -3.3, 1.2, .1, true), pad(2.5, -4, 1.5, -.08, false), pad(-.4, -4.5, 1.1, .05, false), pad(1.4, -2.5, .8, -.1, true), pad(-1.6, -2.3, .6, .2, false), pad(.6, -5.6, 1.4, .06, false), pad(-2.2, -5.9, 1.2, -.1, true)];
+// fireflies drifting low over the water (one draw call)
+const fireflies = (() => { const n = 30, p = new Float32Array(n * 3), c = new Float32Array(n * 3), data = [];
+  for (let i = 0; i < n; i++) data.push({x:(Math.random() - .5) * 8, y:HORIZON - .2 - Math.random() * 3.6, z:-1.6 + Math.random() * 3, ph:Math.random() * 20, sp:.25 + Math.random() * .35, bl:.6 + Math.random() * 1.2});
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3)); g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+  const m = new THREE.Points(g, new THREE.PointsMaterial({size:.26, map:glowTex, vertexColors:true, transparent:true, blending:ADD, depthWrite:false})); scene.add(m); return {m, data, n}; })();
+const ffCol = L_('#e9f08c');
+// paper lanterns set adrift on the water: one for every round you play back
+const floats = [], floatBox = new THREE.BoxGeometry(.24, .2, .2), floatBase = new THREE.BoxGeometry(.3, .035, .24);
+const floatWood = new THREE.MeshStandardMaterial({color:0x2a1d14, roughness:.9, transparent:true});
+function spawnFloat(ci, k0 = 0){
+  if (floats.length >= 8){ const o = floats.shift(); scene.remove(o.g); scene.remove(o.refl); o.mat.dispose(); o.glow.material.dispose(); o.refl.material.dispose(); }
+  const g = new THREE.Group(), col = LAMPS[ci % LAMPS.length].col;
+  const mat = new THREE.MeshStandardMaterial({color:L_('#f3e2bd'), map:grain, roughness:1, emissive:L_(col), emissiveIntensity:.8, transparent:true});
+  const box = new THREE.Mesh(floatBox, mat), base = new THREE.Mesh(floatBase, floatWood); base.position.y = -.115; g.add(box, base);
+  const gl = glow(col, 1, .4); gl.position.z = .2; g.add(gl);
+  const refl = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_(col), transparent:true, opacity:.25, blending:ADD, depthWrite:false})); scene.add(refl); scene.add(g);
+  floats.push({g, mat, glow:gl, refl, k:k0, x:(Math.random() - .5) * 4.4, vx:(Math.random() - .5) * .08, dur:55 + Math.random() * 30, ph:Math.random() * 6});
+}
+
+// ================= scenes: built on demand =================
+const SCENE_TINT = {bamboo:{r:L_('#1f4a3c'), k:.28, w:L_('#163a34'), kw:.18}, temple:{r:L_('#4a2c48'), k:.14, w:L_('#2a1c36'), kw:.08}, snow:{r:L_('#a9b6dd'), k:.32, w:L_('#7f8fbd'), kw:.22}};
+const SCENE_AMB = {lake:[1, 1, 1, 1], bamboo:[.8, 1.5, 1, 1.1], temple:[.9, 1.1, .8, 1], snow:[.5, 1.8, 0, .2]};
+const sceneParts = {};
+function shapesMesh(shapes, col, z, shadow = false){ const m = new THREE.Mesh(new THREE.ExtrudeGeometry(shapes, {depth:.02, bevelEnabled:false, curveSegments:6}), paperMat(col)); m.position.z = z; m.castShadow = shadow; m.receiveShadow = true; return m; }
+function leafShape(bx, by, ang, len, w){ const dx = Math.cos(ang), dy = Math.sin(ang), px = -dy, py = dx, pts = [];
+  for (let i = 0; i <= 8; i++){ const t = i / 8, k = Math.sin(Math.PI * Math.pow(t, .8)) * w; pts.push([bx + dx * len * t + px * k, by + dy * len * t + py * k]); }
+  for (let i = 7; i > 0; i--){ const t = i / 8, k = Math.sin(Math.PI * Math.pow(t, .8)) * w * .35; pts.push([bx + dx * len * t - px * k, by + dy * len * t - py * k]); }
+  return poly(pts); }
+function bambooShapes(R, xs, y0, hMin, hMax, wMin, wMax, seg, leaves, side){ const shapes = [];
+  for (const x0 of xs){ const w = wMin + R() * (wMax - wMin), h = hMin + R() * (hMax - hMin), lean = (R() - .5) * .25; let y = y0;
+    while (y < y0 + h){ const sh = Math.min(seg * (.8 + R() * .4), y0 + h - y), xa = x0 + lean * (y - y0) / h, xb = x0 + lean * (y + sh - y0) / h;
+      shapes.push(poly([[xa - w / 2, y], [xa + w / 2, y], [xb + w / 2 * .92, y + sh - seg * .03], [xb - w / 2 * .92, y + sh - seg * .03]]));
+      if (leaves && R() < .55 && y > y0 + h * .35){ const n = 2 + Math.floor(R() * 3); for (let k = 0; k < n; k++){ const a = (side > 0 ? Math.PI : 0) + (side > 0 ? -1 : 1) * (.2 + R() * .7) + (R() - .5) * .5 - .35; shapes.push(leafShape(xb, y + sh, a, .45 + R() * .35, .055 + R() * .03)); } }
+      y += sh; } }
+  return shapes; }
+function pineShapes(cx, base, h, w){ const shapes = [poly([[cx - .04 * w, base], [cx + .04 * w, base], [cx + .04 * w, base + h * .2], [cx - .04 * w, base + h * .2]])], tiers = 4;
+  for (let k = 0; k < tiers; k++){ const top = base + h - k * h * .19, bot = top - h * .32, hw = (.18 + k * .1) * w, pts = [[cx, top]], teeth = 3;
+    for (let t = 0; t <= teeth; t++){ const fx = 1 - t / teeth; pts.push([cx + hw * fx, bot + (t % 2 ? .05 * h : 0)]); }
+    for (let t = 1; t <= teeth; t++){ const fx = t / teeth; pts.push([cx - hw * fx, bot + (t % 2 ? .05 * h : 0)]); }
+    shapes.push(poly(pts)); }
+  return shapes; }
+const BUILD = {
+  bamboo(){ const g = new THREE.Group(), R = seeded('bamboo');
+    for (const side of [-1, 1]){ const xs = [0, 1, 2, 3, 4].map(i => side * (2.35 + i * .3 + R() * .12));
+      g.add(shapesMesh(bambooShapes(R, xs, -6, 6.5, 9, .1, .14, .78, true, side), '#14231f', 2.5 + (side > 0 ? .01 : 0)));
+      const back = shapesMesh(bambooShapes(R, xs.map(x => x - side * .15), -6, 5, 8, .07, .1, .66, true, side), '#1f3430', 1.8); g.add(back); }
+    const far = []; for (let x = -9; x < 9; x += .16 + R() * .22) far.push(x);
+    g.add(shapesMesh(bambooShapes(R, far, HORIZON - .05, .5, 1.6, .025, .045, .35, false, 1), '#25403b', -3.6));
+    return g; },
+  temple(){ const g = new THREE.Group(), dark = '#1a1d33';
+    const hill = new THREE.Mesh(cut(ellipse(1.9, .75), .04), ridges[1].material); hill.position.set(-1.5, -.1, -7.79); g.add(hill);
+    const half = [[0, 1.62], [.025, 1.62], [.025, 1.36], [.14, 1.3], [.42, 1.18], [.47, 1.23], [.44, 1.14], [.22, 1.12], [.22, .93], [.5, .86], [.56, .91], [.52, .82], [.28, .8], [.28, .6], [.58, .53], [.64, .58], [.6, .49], [.34, .47], [.34, .28], [.66, .2], [.72, .26], [.68, .16], [.4, .14], [.4, 0]];
+    const pg = new THREE.Group(); pg.position.set(-1.5, .45, -7.74); pg.scale.setScalar(1.9); g.add(pg);
+    pg.add(layer(poly([...half, ...half.slice().reverse().map(([x, y]) => [-x, y])]), dark, 0, .02, false));
+    [.37, .7, 1.02].forEach(y => { const w = glow('#ffcf8a', .3, .6); w.position.set(0, y, .05); pg.add(w); });
+    // a torii standing in the shallows, with its reflection
+    const tor = [poly([[-.62, 0], [-.52, 0], [-.55, 1.2], [-.63, 1.2]]), poly([[.52, 0], [.62, 0], [.63, 1.2], [.55, 1.2]]), poly([[-.8, 1.3], [.8, 1.3], [.9, 1.42], [.6, 1.38], [-.6, 1.38], [-.9, 1.42]]), poly([[-.72, 1.02], [.72, 1.02], [.72, 1.1], [-.72, 1.1]]), poly([[-.04, 1.1], [.04, 1.1], [.04, 1.3], [-.04, 1.3]])];
+    const torii = shapesMesh(tor, '#6e2622', -1.6); torii.position.set(-2.3, HORIZON - 1.5, -1.6); torii.scale.setScalar(1.1); g.add(torii);
+    const tr = new THREE.Mesh(torii.geometry, new THREE.MeshBasicMaterial({color:L_('#4a2232'), transparent:true, opacity:.35, depthWrite:false})); tr.position.set(-2.3, HORIZON - 1.52, -1.62); tr.scale.set(1.1, -.55, 1.1); g.add(tr);
+    // a stone lantern on a rock, near
+    const toro = [poly([[-.3, 0], [.3, 0], [.22, .1], [-.22, .1]]), poly([[-.07, .1], [.07, .1], [.06, .5], [-.06, .5]]), poly([[-.2, .5], [.2, .5], [.2, .55], [-.2, .55]]), poly([[-.17, .55], [-.09, .55], [-.09, .8], [-.17, .8]]), poly([[.09, .55], [.17, .55], [.17, .8], [.09, .8]]), poly([[-.36, .8], [.36, .8], [.08, 1.02], [-.08, 1.02]]), ellipse(.06, .07, 0, 1.08)];
+    const rock = layer(ellipse(.6, .2), '#262a3c', 0, .04, false); rock.position.set(2.55, -4.25, -.5); g.add(rock);
+    const tm = shapesMesh(toro, '#3a3e52', -.45, true); tm.position.set(2.55, -4.25, -.45); g.add(tm);
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(.16, .24), new THREE.MeshBasicMaterial({color:L_('#ffd08a')})); win.position.set(2.55, -4.25 + .675, -.44); g.add(win);
+    const wg = glow('#ffbf6a', 1.6, .5); wg.position.set(2.55, -3.57, -.3); g.add(wg);
+    const wr = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_('#ffbf6a'), transparent:true, opacity:.25, blending:ADD, depthWrite:false})); wr.scale.set(.5, 1.6, 1); wr.position.set(2.55, -5.2, -.5); g.add(wr);
+    g.userData.flick = [wg, win]; return g; },
+  snow(){ const g = new THREE.Group(), R = seeded('snow');
+    // snow caps on each ridge, laid just in front of it
+    g.userData.caps = ridgeData.map((rd, i) => { const shapes = [];
+      for (let j = 1; j < rd.pts.length - 1; j += 2){ const [px, py] = rd.pts[j], [lx, ly] = rd.pts[j - 1], [rx, ry] = rd.pts[j + 1], f = .32 + R() * .14;
+        if (py - Math.min(ly, ry) < .25) continue;
+        const L = [px + (lx - px) * f, py + (ly - py) * f], Rr = [px + (rx - px) * f, py + (ry - py) * f];
+        shapes.push(poly([[px, py], Rr, [Rr[0] + (L[0] - Rr[0]) * .3, Rr[1] + .06], [Rr[0] + (L[0] - Rr[0]) * .55, Rr[1] - .03], [Rr[0] + (L[0] - Rr[0]) * .78, L[1] + .05], L])); }
+      const m = shapesMesh(shapes, '#e8eefb', RIDGES[i][3] + .2 + .002); m.receiveShadow = false; g.add(m); return m; });
+    for (const side of [-1, 1]){ const sh = []; [0, 1, 2].forEach(k => sh.push(...pineShapes(side * (2.6 + k * .55 + R() * .2), -6 + R() * .4, 4.6 + R() * 1.8, 1.4 + R() * .3)));
+      g.add(shapesMesh(sh, '#141a2c', 2.5));
+      const sn = []; [0, 1].forEach(k => sn.push(...pineShapes(side * (2.35 + k * .7), -6, 3.4 + R(), 1.1))); g.add(shapesMesh(sn, '#1d2540', 1.9)); }
+    const far = []; for (let x = -9; x < 9; x += .35 + R() * .4) far.push(...pineShapes(x, HORIZON - .05, .5 + R() * .5, .55));
+    g.add(shapesMesh(far, '#2a3358', -3.6));
+    // ice floes resting on the still water
+    [[-2.6, -3.3, 1.2], [2.4, -4.1, 1.5], [-.5, -4.7, 1], [1.3, -2.6, .7], [-1.9, -5.8, 1.3], [.9, -5.5, .9]].forEach(([x, y, sc]) => { const pts = []; for (let k = 0; k < 9; k++){ const a = k / 9 * Math.PI * 2, r = .42 + R() * .14; pts.push([Math.cos(a) * r, Math.sin(a) * r * .38]); }
+      const f = layer(poly(pts), '#cdd7ef', -.8, .03, false); f.position.set(x, y, -.8); f.scale.setScalar(sc); g.add(f);
+      const top = layer(ellipse(.22, .06), '#eef3fd', -.77, .01, false); top.position.set(x - .05 * sc, y + .02, -.76); top.scale.setScalar(sc); g.add(top); });
+    // falling snow (one draw call)
+    const n = 170, p = new Float32Array(n * 3), data = []; for (let i = 0; i < n; i++) data.push({x:(Math.random() - .5) * 12, y:-6 + Math.random() * 13, z:-3 + Math.random() * 5.5, v:.25 + Math.random() * .35, ph:Math.random() * 6});
+    const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    const flakes = new THREE.Points(geo, new THREE.PointsMaterial({size:.13, map:glowTex, color:0xf2f5ff, transparent:true, opacity:.9, depthWrite:false})); g.add(flakes);
+    g.userData.snow = {flakes, data, p}; return g; },
+};
+function applyScene(id){
+  if (!SCENES.some(s => s.id === id)) id = 'lake'; sceneId = id;
+  if (BUILD[id] && !sceneParts[id]){ sceneParts[id] = BUILD[id](); scene.add(sceneParts[id]); }
+  for (const k in sceneParts) sceneParts[k].visible = k === id;
+  reeds.forEach(r => r.visible = id === 'lake' || id === 'temple');
+  pads.forEach((p, i) => p.visible = id !== 'snow' && !(id === 'temple' && (i === 1 || i === 3)) && !(id === 'bamboo' && i === 5));
+  fireflies.m.visible = id !== 'snow';
+  applyTime(0, true);
+}
+
+// ================= the lanterns =================
+const ROPE_Y = 1.75, ROPE_SAG = .45;
+const ropeY = x => ROPE_Y - ROPE_SAG * (1 - Math.pow(x / 4, 2));
+const rope = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(Array.from({length:21}, (_, i) => { const x = -4.4 + 8.8 * i / 20; return new THREE.Vector3(x, ropeY(x), 0); })), 60, .012, 6), new THREE.MeshStandardMaterial({color:0x1b1712, roughness:1}));
+rope.castShadow = true; scene.add(rope);
+// a paper lantern: a lathe profile with ribs printed on the paper
+const ribTex = (() => { const c = document.createElement('canvas'); c.width = 256; c.height = 64; const x = c.getContext('2d'); x.drawImage(grain.image, 0, 0, 256, 64);
+  x.fillStyle = 'rgba(60,30,10,.32)'; for (let i = 0; i < 10; i++) x.fillRect(i * 25.6, 0, 2.2, 64);
+  const t = new THREE.CanvasTexture(c); t.wrapS = THREE.RepeatWrapping; return t; })();
+const lathe = pts => new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 28);
+const STYLE_GEO = {};
+function styleGeo(id){
+  if (STYLE_GEO[id]) return STYLE_GEO[id];
+  let S;
+  if (id === 'tall') S = {geo:lathe([[0, -.5], [.13, -.5], [.21, -.45], [.245, -.3], [.255, 0], [.245, .3], [.21, .45], [.13, .5], [0, .5]]), hh:.5, map:ribTex, bot:true};
+  else if (id === 'star'){ const s = new THREE.Shape(); for (let i = 0; i < 10; i++){ const a = Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? .18 : .41; i ? s.lineTo(Math.cos(a) * r, Math.sin(a) * r) : s.moveTo(Math.cos(a) * r, Math.sin(a) * r); }
+    const g = new THREE.ExtrudeGeometry(s, {depth:.14, bevelEnabled:true, bevelThickness:.035, bevelSize:.03, bevelSegments:2, curveSegments:4}); g.translate(0, -.045, -.07); S = {geo:g, hh:.37, map:grain, bot:false}; }
+  else if (id === 'lotus'){ const parts = [];
+    const petal = (n, tilt, sc, off, rad) => { for (let k = 0; k < n; k++){ const g = new THREE.SphereGeometry(.11 * sc, 10, 8); g.scale(1, 2.5, .45); g.translate(0, .27 * sc, 0); g.rotateX(tilt); g.translate(0, 0, rad); g.rotateY(k * Math.PI * 2 / n + off); g.translate(0, -.24, 0); parts.push(g); } };
+    petal(8, .62, 1, 0, .1); petal(6, .3, .85, .3, .05); const b = new THREE.SphereGeometry(.2, 14, 8, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2); b.scale(1, .55, 1); b.translate(0, -.22, 0); parts.push(b);
+    S = {geo:mergeGeos(parts), hh:.3, map:grain, bot:false}; }
+  else S = {geo:lathe([[0, -.36], [.16, -.37], [.27, -.28], [.33, -.12], [.34, .04], [.31, .2], [.22, .32], [.12, .36], [0, .36]]), hh:.36, map:ribTex, bot:true};
+  return STYLE_GEO[id] = S;
+}
+const capGeo = new THREE.CylinderGeometry(.13, .15, .07, 20), stringGeo = new THREE.CylinderGeometry(.006, .006, 1, 5), tasselGeo = new THREE.ConeGeometry(.04, .18, 10);
+const woodMat = new THREE.MeshStandardMaterial({color:0x2a1d14, roughness:.9});
+function setLampStyle(l, id){ const u = l.userData, S = styleGeo(id);
+  u.body.geometry = S.geo; u.body.position.y = u.bodyY = -.26 - S.hh; u.mat.map = S.map; u.mat.needsUpdate = true;
+  u.bot.visible = S.bot; u.bot.position.y = -.26 - 2 * S.hh - .02; u.tas.position.y = u.bot.position.y - .13 + (S.bot ? 0 : .07); u.halo.position.y = u.bodyY; }
+function makeLamp(i){
+  const L = LAMPS[i], g = new THREE.Group(), swing = new THREE.Group(); g.add(swing);
+  const mat = new THREE.MeshStandardMaterial({color:L_(L.col), map:ribTex, roughness:.85, emissive:L_(L.col), emissiveIntensity:.18, side:THREE.DoubleSide});
+  const body = new THREE.Mesh(styleGeo('round').geo, mat); body.castShadow = true; swing.add(body);
+  const top = new THREE.Mesh(capGeo, woodMat); top.position.y = -.24; swing.add(top);
+  const bot = new THREE.Mesh(capGeo, woodMat); swing.add(bot);
+  const str = new THREE.Mesh(stringGeo, woodMat); str.scale.y = .22; str.position.y = -.11; swing.add(str);
+  const tas = new THREE.Mesh(tasselGeo, new THREE.MeshStandardMaterial({color:L_(L.col), roughness:1})); tas.rotation.x = Math.PI; swing.add(tas);
+  const halo = glow(L.col, 1.7, .12); halo.position.z = .3; swing.add(halo);
+  const sp = op => { const s = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_(L.col), transparent:true, opacity:op, blending:ADD, depthWrite:false})); scene.add(s); return s; };
+  const refl = sp(.08), spill = sp(0), emb = sp(1); emb.material.color.lerp(new THREE.Color(1, .95, .8), .45); emb.visible = false;
+  g.userData = {i, swing, body, bot, tas, mat, halo, refl, spill, emb, sing:-1e9, wrong:-1e9, hint:-1e9, wave:-1e9, join:-1e9, arrived:true, idle:Math.random() * 6, light:0, lit:0, x:0, tx:0, s:1, ts:1, bodyY:-.62};
+  setLampStyle(g, styleId);
+  scene.add(g); return g;
+}
+const lamps = [];
+let lampCount = 0;
+const lampScale = n => n > 6 ? 1.02 : n > 5 ? 1.15 : n > 4 ? 1.3 : 1.45;
+function layoutLamps(n, animate){
+  while (lamps.length < n) lamps.push(makeLamp(lamps.length));
+  const span = n > 1 ? Math.min(5.2, 1.45 * (n - 1)) : 0, sc = lampScale(n);
+  lamps.forEach((l, i) => { const u = l.userData, on = i < n, was = l.visible && i < lampCount;
+    l.visible = on; u.refl.visible = u.spill.visible = on; if (!on){ u.emb.visible = false; return; }
+    u.tx = n > 1 ? -span / 2 + span * i / (n - 1) : 0; u.ts = sc;
+    if (!was || !animate){ u.x = u.tx; u.s = sc; }
+    if (!was && animate){ u.join = now; u.arrived = false; } else if (!animate){ u.join = -1e9; u.arrived = true; } });
+  lampCount = n;
+}
+function applyStyle(id){ if (!STYLES.some(s => s.id === id)) id = 'round'; styleId = id; lamps.forEach(l => setLampStyle(l, id)); }
+
+// ================= the night deepens as the tune grows =================
+const TIMES = [
+  {name:'Twilight',        top:0x1b2448, bot:0x6a5b8c, ridges:[0x4b4f80, 0x3d4271, 0x2f3460, 0x22264a], water:[0x3b3966, 0x161a33], mist:.26, moonY:3.6, moonE:.75, stars:.35, aurora:0, aurA:0x7be0c3, aurB:0x4fd1a5, hemi:.5, glow:0xe8907e, glowOp:.5, fire:.4, shoot:0, amb:[1, .3, .5, .2]},
+  {name:'Night',           top:0x0f1630, bot:0x2c3263, ridges:[0x34396a, 0x2a2f5a, 0x20254a, 0x161b38], water:[0x262a52, 0x0d1126], mist:.2, moonY:4.6, moonE:.95, stars:.8, aurora:0, aurA:0x7be0c3, aurB:0x4fd1a5, hemi:.4, glow:0x6a5fa0, glowOp:.18, fire:1, shoot:.035, amb:[1, .3, 1, 0]},
+  {name:'Midnight',        top:0x070b1d, bot:0x1a1f45, ridges:[0x262a52, 0x1e2246, 0x171b3a, 0x10142c], water:[0x1a1e40, 0x070a1a], mist:.13, moonY:5.4, moonE:1.05, stars:1, aurora:.28, aurA:0x6f78e0, aurB:0x56b8c8, hemi:.32, glow:0x3a3f80, glowOp:.12, fire:.6, shoot:.1, amb:[.8, .45, .7, 0]},
+  {name:'Northern lights', top:0x061a22, bot:0x163a4a, ridges:[0x1f3a4a, 0x19303f, 0x132634, 0x0d1b26], water:[0x163242, 0x05121a], mist:.18, moonY:5.1, moonE:.9, stars:1, aurora:1, aurA:0x7be0c3, aurB:0x9b7be0, hemi:.36, glow:0x2fae8a, glowOp:.26, fire:.3, shoot:.05, amb:[.75, 1, .25, 0]},
+  {name:'First light',     top:0x2b3263, bot:0xe3a08a, ridges:[0x6e5a82, 0x584970, 0x433a5e, 0x2f2a4a], water:[0x6b5a7e, 0x2a2546], mist:.32, moonY:2.4, moonE:.45, stars:.15, aurora:0, aurA:0x7be0c3, aurB:0x4fd1a5, hemi:.55, glow:0xffb27a, glowOp:.85, fire:.08, shoot:0, amb:[1, .35, .08, 1]},
+];
+let timeIdx = 0;
+const NUMS = ['mist', 'moonY', 'moonE', 'stars', 'aurora', 'hemi', 'glowOp', 'fire', 'shoot'];
+const cur = {top:new THREE.Color(), bot:new THREE.Color(), ridges:[0, 1, 2, 3].map(() => new THREE.Color()), water:[new THREE.Color(), new THREE.Color()], glow:new THREE.Color(), aurA:new THREE.Color(), aurB:new THREE.Color(), amb:[1, .3, 1, 0], mist:.2, moonY:4, moonE:.9, stars:.5, aurora:0, hemi:.4, glowOp:0, fire:1, shoot:0};
+const tmpC = new THREE.Color(), tmpC2 = new THREE.Color();
+function applyTime(dt, snap){
+  const t = TIMES[timeIdx], k = snap ? 1 : Math.min(1, dt * .9);
+  cur.top.lerp(tmpC.set(t.top), k); cur.bot.lerp(tmpC.set(t.bot), k); cur.ridges.forEach((r, i) => r.lerp(tmpC.set(t.ridges[i]), k)); cur.water.forEach((w, i) => w.lerp(tmpC.set(t.water[i]), k));
+  cur.glow.lerp(tmpC.set(t.glow), k); cur.aurA.lerp(tmpC.set(t.aurA), k); cur.aurB.lerp(tmpC.set(t.aurB), k);
+  for (const key of NUMS) cur[key] += (t[key] - cur[key]) * k;
+  cur.amb.forEach((v, i) => cur.amb[i] += (t.amb[i] - v) * k);
+  const tint = SCENE_TINT[sceneId];
+  skyMat.uniforms.top.value.copy(cur.top).convertSRGBToLinear(); skyMat.uniforms.bot.value.copy(cur.bot).convertSRGBToLinear();
+  waterMat.uniforms.top.value.copy(cur.water[0]).convertSRGBToLinear(); waterMat.uniforms.bot.value.copy(cur.water[1]).convertSRGBToLinear();
+  if (tint){ waterMat.uniforms.top.value.lerp(tint.w, tint.kw); waterMat.uniforms.bot.value.lerp(tint.w, tint.kw * .6); }
+  ridges.forEach((r, i) => { r.material.color.copy(cur.ridges[i]).convertSRGBToLinear(); if (tint) r.material.color.lerp(tint.r, tint.k); });
+  if (sceneId === 'snow' && sceneParts.snow) sceneParts.snow.userData.caps.forEach((m, i) => m.material.color.copy(ridges[i].material.color).lerp(tmpC2.set(0xdfe6fa).convertSRGBToLinear(), .62 - i * .07));
+  mists.forEach(m => m.material.opacity = cur.mist * (sceneId === 'snow' ? 1.3 : 1));
+  moon.position.set(2.3, cur.moonY, -12.6); moonGlow.position.set(2.3, cur.moonY, -12.7); moon.material.emissiveIntensity = cur.moonE * .62; moonGlow.material.opacity = .22 + cur.moonE * .15; hemi.intensity = cur.hemi;
+  aurora[0].material.color.copy(cur.aurA).convertSRGBToLinear(); aurora[1].material.color.copy(cur.aurB).convertSRGBToLinear();
+  aurora.forEach(a => a.material.opacity = cur.aurora * .34);
+  horizonGlow.material.color.copy(cur.glow).convertSRGBToLinear(); horizonGlow.material.opacity = cur.glowOp * .6;
+  dust.material.opacity = cur.stars * .55;
+  document.body.style.background = '#' + cur.top.getHexString();
+}
+const timeFor = len => Math.min(TIMES.length - 1, Math.floor(len / 5));
+
+// ================= embers that rise from a lantern as it sounds =================
+const embers = [];
+function ember(l){
+  for (let k = 0; k < 3; k++){ const e = glow(LAMPS[l.userData.i].col, .16, .9); const p = l.position; e.position.set(p.x + (Math.random() - .5) * .3, p.y - .3, .4); scene.add(e); embers.push({e, t:-k * .08, vx:(Math.random() - .5) * .25}); }
+}
+
+// ================= game =================
+const lampsFor = len => Math.min(6, 4 + Math.floor(len / 5));
+const mult = () => Math.min(4, 1 + Math.floor(combo / 2));
+const playing = () => !over && !paused && !adOpen && $('home').hidden && $('overlay').hidden && $('pause').hidden && $('coach').hidden && document.visibilityState === 'visible';
+function pickNote(){ let n; do { n = Math.floor(Math.random() * lampCount); } while (seq.length >= 2 && seq[seq.length - 1] === n && seq[seq.length - 2] === n); return n; }
+const gap = () => Math.max(.32, M.gap - seq.length * .012);
+function growTimes(){ const g = gap(); seqT = seq.map((_, i) => i * g); }
+function setRound(notes, beat){ seq = notes.map(n => n.lamp); seqT = []; let t = 0; for (const n of notes){ seqT.push(t); t += n.d * beat; } }
+function setMelRound(){ const sg = mel.segs[mel.r]; setRound(mel.tune.phrases[sg.p].slice(0, sg.len), mel.tune.beat); paintHud(); }
+function clearFloats(){ while (floats.length){ const o = floats.pop(); scene.remove(o.g); scene.remove(o.refl); o.mat.dispose(); o.glow.material.dispose(); o.refl.material.dispose(); } }
+function newGame(){
+  over = false; paused = false; continued = false; won = false; lives = M.lives; step = 0; score = 0; combo = 0; runTunes = 0; roundClean = true; startHi = hiOf(mode); taps = [];
+  $('overlay').hidden = $('pause').hidden = true; clearFloats(); timeIdx = 0;
+  if (M.kind === 'grow'){ lampNote = PENTA.slice(); layoutLamps(4, false); seq = []; seq.push(pickNote()); growTimes(); startShow(1.1); }
+  else if (M.kind === 'daily'){ daily = makeDaily(dayKey()); lampNote = [0, 2, 4, 7, 9]; layoutLamps(5, false); setRound(daily.notes.slice(0, 3), daily.beat); startShow(1.6); banner("Today's tune", daily.name, dailyStreak() ? `Streak ${dailyStreak()}` : '', 3); }
+  else { mel = {ti:store.mAt % PARSED.length}; setupTune(false); }
+  paintHud();
+}
+function setupTune(animate){
+  const tn = PARSED[mel.ti]; mel.tune = tn; mel.segs = melSegs(tn); mel.r = 0;
+  lampNote = tn.pitches.slice(); layoutLamps(tn.pitches.length, animate);
+  phase = 'tuning'; phaseT = animate ? -1.5 : -1.2; tuneI = 0; setCue('Listen', false);
+  banner(`Melody ${mel.ti + 1} of ${PARSED.length}`, store.tunes.includes(tn.id) ? tn.name : 'Listen closely', '', 2.6);
+  paintHud();
+}
+function startShow(delay = .6){ phase = 'show'; phaseT = -delay; showI = 0; step = 0; taps = []; setCue('Listen', false); }
+function setCue(text, you){ const c = $('cue'); c.textContent = text; c.classList.toggle('you', you); }
+function sound_(l, wrong, vol = 1){
+  const u = l.userData; if (wrong){ u.wrong = now; Sfx.wrong(); return; }
+  u.sing = now; Sfx.note(lampNote[u.i], vol); ember(l);
+}
+function update(dt){
+  if (!playing()) return;
+  phaseT += dt;
+  if (phase === 'show' || phase === 'finale'){
+    while (showI < seq.length && phaseT >= seqT[showI]){ sound_(lamps[seq[showI]]); showI++; }
+    const end = seqT[seq.length - 1] || 0;
+    if (showI >= seq.length && phase === 'show' && phaseT >= end + .45){ phase = 'input'; step = 0; taps = []; setCue(M.reverse ? 'Your turn, backwards' : 'Your turn', true); }
+    else if (showI >= seq.length && phase === 'finale' && phaseT >= end + 1.4) afterFinale();
+  } else if (phase === 'tuning'){
+    // the new tune's lanterns ring once, low to high, so you hear what each one sings
+    while (tuneI < lampCount && phaseT >= tuneI * .17){ sound_(lamps[tuneI], false, .55); tuneI++; }
+    if (tuneI >= lampCount && phaseT >= lampCount * .17 + .7){ setMelRound(); startShow(.2); }
+  } else if (phase === 'next' && phaseT >= .8) advance();
+}
+function advance(){
+  if (M.kind === 'grow'){
+    const n = lampsFor(seq.length); let d = .3;
+    if (n > lampCount){ layoutLamps(n, true); banner('A lantern is lit', LAMP_NAMES[n - 1]); d = 1.7; }
+    const t = timeFor(seq.length); if (t !== timeIdx){ timeIdx = t; banner('The night turns', TIMES[t].name); }
+    seq.push(pickNote()); growTimes(); paintHud(); startShow(d);
+  } else if (M.kind === 'daily'){
+    if (seq.length >= daily.notes.length){ dailyDone(); return; }
+    const n = seq.length + 1; setRound(daily.notes.slice(0, n), daily.beat);
+    const t = timeFor(n); if (t !== timeIdx){ timeIdx = t; banner('The night turns', TIMES[t].name); }
+    paintHud(); startShow(.3);
+  } else {
+    mel.r++; if (mel.r >= mel.segs.length){ tuneDone(); return; }
+    const fresh = mel.segs[mel.r].p !== mel.segs[mel.r - 1].p;
+    setMelRound(); startShow(fresh ? .8 : .3); if (fresh) setCue('Next phrase', false);
+  }
+}
+function rhythmOk(){
+  const n = seq.length; if (n < 3 || taps.length !== n) return false;
+  const e = []; for (let i = 0; i < n - 1; i++) e.push(seqT[i + 1] - seqT[i]); if (M.reverse) e.reverse();
+  let num = 0, den = 0; const d = []; for (let i = 0; i < n - 1; i++){ d.push(taps[i + 1] - taps[i]); num += d[i] * e[i]; den += e[i] * e[i]; }
+  const s = num / den; if (!(s > .65 && s < 1.5)) return false;
+  let err = 0, me = 0; for (let i = 0; i < n - 1; i++){ err += Math.abs(d[i] - s * e[i]); me += e[i]; }
+  return err / me < .22;
+}
+function roundDone(){
+  phase = 'next'; phaseT = 0; const len = seq.length, inTime = rhythmOk();
+  if (roundClean) combo++; roundClean = true;
+  const bonus = inTime ? 5 * len * mult() : 0; score += bonus;
+  setCue(inTime ? `In time · +${bonus}` : mult() > 1 ? `Well played · ×${mult()}` : 'Well played', false); if (inTime) Sfx.chime();
+  if (M.kind === 'grow' && len > bestOf(mode)) store.best[mode] = len;
+  if (M.kind === 'daily' && len > bestOf('daily')) store.best.daily = len;
+  if (M.kind === 'grow'){ if (len % 10 === 0 && PLATFORM.onMilestone) setTimeout(() => PLATFORM.onMilestone(len), 900);
+    if (M.zen && len % 10 === 0 && PLATFORM.onHappy) setTimeout(() => PLATFORM.onHappy(len), 900); }
+  celebrate(false); spawnFloat(seq[len - 1]); persist(); paintHud();
+}
+function celebrate(big){
+  lamps.forEach((l, i) => { if (i < lampCount) l.userData.wave = now + 120 + i * 85; });
+  if (big){ sparkleT = now; spawnShoot(); for (let k = 0; k < 2; k++) spawnFloat(Math.floor(Math.random() * lampCount)); }
+  else if (combo >= 3 && combo % 3 === 0) sparkleT = now;
+}
+function tapLamp(l){
+  if (!l || !playing()) return;
+  if (phase !== 'input'){ sound_(l); return; }   // playing along while listening is free
+  const want = M.reverse ? seq[seq.length - 1 - step] : seq[step];
+  if (l.userData.i === want){
+    sound_(l); taps.push(performance.now() / 1000); step++; score += 10 * mult(); store.notes++;
+    if (step >= seq.length) roundDone(); else paintHud();
+  } else {
+    sound_(l, true); shake = .1; lamps[want].userData.hint = now; combo = 0; roundClean = false;
+    if (M.zen){ setCue('Listen again', false); phase = 'wait'; paintHud(); setTimeout(() => { if (phase === 'wait') startShow(.2); }, 800); return; }
+    lives--; paintHud();
+    if (lives <= 0){ endGame(false); return; }
+    setCue('Listen again', false); phase = 'wait'; setTimeout(() => { if (!over && phase === 'wait') startShow(.2); }, 1000);
+  }
+}
+function startFinale(notes, beat, small, big, sub){ setRound(notes, beat); phase = 'finale'; phaseT = -.9; showI = 0; setCue('Listen', false); banner(small, big, sub, 4.6); celebrate(true); Sfx.win(); }
+function tuneDone(){
+  runTunes++; const tn = mel.tune; if (!store.tunes.includes(tn.id)) store.tunes.push(tn.id);
+  store.mAt = mel.ti + 1; if (runTunes > bestOf('melody')) store.best.melody = runTunes;
+  score += 50 * mult(); if (lives < 3) lives++; persist();
+  const fin = []; for (const ph of tn.phrases){ if (fin.length && fin.length + ph.length > 18) break; fin.push(...ph); }
+  startFinale(fin, tn.beat * .9, 'You played', tn.name, tn.by); paintHud();
+  if (PLATFORM.onTune) PLATFORM.onTune(runTunes);   // a finished melody: a happy moment for the iOS rating sheet
+}
+function dailyDone(){
+  const d = store.daily, today = dayKey();
+  if (d.last !== today){ d.streak = d.last === yesterdayKey() ? (d.streak || 0) + 1 : 1; d.last = today; d.done = (d.done || 0) + 1; }
+  score += 100; won = true; persist(); paintHud();
+  startFinale(daily.notes, daily.beat * .9, "Today's tune", daily.name, `Streak ${d.streak}`);
+}
+function afterFinale(){
+  if (M.kind === 'daily'){ endGame(true); return; }
+  mel.ti = (mel.ti + 1) % PARSED.length; timeIdx = (timeIdx + 1) % TIMES.length; setupTune(true);
+}
+function endGame(win){
+  over = true; phase = 'over'; if (!win) Sfx.lose();
+  if (score > hiOf(mode)) store.hi[mode] = score;
+  const newBest = score > startHi && score > 0, unl = checkUnlocks(); persist();
+  const notes = Math.max(0, seq.length - 1), total = daily ? daily.notes.length : 16;
+  setTimeout(() => {
+    $('ovTitle').textContent = win ? "Today's tune is yours" : 'The lanterns went dark';
+    const subs = {grow:`You played back ${notes} note${notes === 1 ? '' : 's'}`, melody:`${runTunes} tune${runTunes === 1 ? '' : 's'} played`, daily:win ? daily.name : `${notes} of ${total} notes`};
+    $('ovSub').textContent = newBest ? 'New best' : subs[M.kind]; $('ovSub').className = 'sub' + (newBest ? ' nb' : '');
+    const st = M.kind === 'melody' ? [['Score', score], ['Tunes', runTunes], ['Best', hiOf(mode)]] : M.kind === 'daily' ? [['Score', score], ['Notes', `${win ? total : notes}/${total}`], ['Streak', dailyStreak()]] : [['Score', score], ['Notes', notes], ['Best', hiOf(mode)]];
+    $('ovStats').innerHTML = st.map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join('');
+    $('ovUnl').hidden = !unl.length; $('ovUnl').textContent = unl.length ? 'Unlocked: ' + unl.join(', ') : '';
+    $('overlay').hidden = false;
+    if (PLATFORM.onGameOver) PLATFORM.onGameOver({score, best:hiOf(mode), mode, newBest, continued, won:!!win});
+  }, win ? 400 : 1000);
+}
+
+// ================= HUD =================
+const FLAME = '<svg viewBox="0 0 24 24"><path d="M12 2c1 4 6 6 6 12a6 6 0 0 1-12 0c0-3 2-5 3-7 0 3 1 4 2 4 0-3-1-6 1-9z" fill="#e6a23c" stroke="#1d2a2c" stroke-width="1.1" stroke-linejoin="round"/></svg>';
+function hudLabel(){
+  if (M.kind === 'melody' && mel && mel.segs) return `Melody · phrase ${mel.segs[Math.min(mel.r, mel.segs.length - 1)].p + 1} of ${mel.tune.phrases.length}`;
+  if (M.kind === 'daily' && daily) return `Daily · ${seq.length} of ${daily.notes.length}`;
+  return M.name;
+}
+function paintHud(){
+  $('modeName').textContent = hudLabel(); $('score').textContent = score; $('best').textContent = Math.max(hiOf(mode), score);
+  const m = mult(); $('combo').textContent = m > 1 ? '×' + m : ''; $('combo').classList.toggle('on', m > 1);
+  $('lives').innerHTML = M.zen ? '' : Array.from({length:3}, (_, i) => FLAME.replace('<svg', `<svg class="${i < lives ? '' : 'gone'}"`)).join('');
+}
+// banners queue so two never sit on top of each other
+let bannerFree = 0;
+function banner(small, big, sub = '', dur = 2.4){
+  const show = () => { const el = document.createElement('div'); el.className = 'banner tag'; el.style.setProperty('--bd', dur + 's'); el.innerHTML = `<small>${small}</small><b>${big}</b>${sub ? `<em>${sub}</em>` : ''}`; document.body.appendChild(el); setTimeout(() => el.remove(), dur * 1000); };
+  const t = performance.now(), at = Math.max(t, bannerFree); bannerFree = at + dur * 850;
+  if (at <= t) show(); else setTimeout(show, at - t);
+}
+const proj = new THREE.Vector3();
+function pauseGame(){ if (over || paused || !$('home').hidden) return; paused = true;
+  const bst = Math.max(hiOf(mode), score), st = M.kind === 'melody' ? [['Score', score], ['Tunes', runTunes], ['Best', bst]] : [['Score', score], ['Notes', Math.max(0, seq.length - 1)], ['Best', bst]];
+  $('pStats').innerHTML = st.map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join(''); $('pause').hidden = false; }
+function resumeShow(){ if (phase === 'show') startShow(.4); else if (phase === 'finale'){ phaseT = -.4; showI = 0; } }
+function resumeGame(){ paused = false; $('pause').hidden = true; Sfx.unlock(); resumeShow(); }
+$('pauseBtn').onclick = () => { Sfx.unlock(); pauseGame(); };
+$('pResume').onclick = resumeGame;
+$('pRestart').onclick = () => { Sfx.unlock(); newGame(); };
+$('pHome').onclick = () => { $('pause').hidden = true; paused = false; showHome(); };
+$('pHelp').onclick = () => { $('pause').hidden = true; $('coach').hidden = false; };
+$('coachOk').onclick = () => { $('coach').hidden = true; store.seen = true; paused = false; persist(); Sfx.unlock(); resumeShow(); };
+$('ovNew').onclick = () => { Sfx.unlock(); newGame(); };
+$('ovModes').onclick = () => showHome();
+const paintSound = () => { $('soundBtn').classList.toggle('off', !sound); $('homeSound').classList.toggle('off', !sound); };
+$('soundBtn').onclick = $('homeSound').onclick = () => { sound = !sound; paintSound(); persist(); Sfx.unlock(); Sfx.mute(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible'){ pauseGame(); Sfx.sleep(); } else Sfx.wake(); });
+window.NEON = {   // same wrapper API as the other games
+  continueGame(){ over = false; continued = true; lives = 1; $('overlay').hidden = true; paintHud(); startShow(.6); Sfx.join(); },
+  toast(msg){ banner('', msg); },
+  get mode(){ return mode; }, get over(){ return over; },
+  set adOpen(v){ adOpen = !!v; },
+};
+window.__pe = {get s(){ return {phase, seq:seq.slice(), seqT:seqT.slice(), mode, lampCount, step, score, combo, lives, timeIdx, scene:sceneId, style:styleId, mel:mel && {ti:mel.ti, r:mel.r, segs:mel.segs && mel.segs.length}, calls:renderer.info.render.calls}; }, stage(i){ timeIdx = i; }};
+
+// ================= 2D paper art for cards and tiles =================
+const hex = n => '#' + n.toString(16).padStart(6, '0');
+function drawLantern2D(x, px, py, s, col, st){
+  const g = x.createRadialGradient(px, py, 1, px, py, 26 * s); g.addColorStop(0, col + 'aa'); g.addColorStop(1, col + '00'); x.fillStyle = g; x.fillRect(px - 26 * s, py - 26 * s, 52 * s, 52 * s);
+  x.fillStyle = col; x.beginPath();
+  if (st === 'tall'){ const w = 6 * s, h = 12 * s; x.moveTo(px - w, py - h + 3 * s); x.quadraticCurveTo(px - w, py - h, px, py - h); x.quadraticCurveTo(px + w, py - h, px + w, py - h + 3 * s); x.lineTo(px + w, py + h - 3 * s); x.quadraticCurveTo(px + w, py + h, px, py + h); x.quadraticCurveTo(px - w, py + h, px - w, py + h - 3 * s); }
+  else if (st === 'star'){ for (let i = 0; i < 10; i++){ const a = -Math.PI / 2 + i * Math.PI / 5, r = (i % 2 ? 4.5 : 10.5) * s; x.lineTo(px + Math.cos(a) * r, py + Math.sin(a) * r); } }
+  else if (st === 'lotus'){ for (let k = -2; k <= 2; k++){ x.moveTo(px, py + 6 * s); x.ellipse(px + k * 3.2 * s, py, 3 * s, 8 * s, k * .38, 0, Math.PI * 2); } }
+  else x.ellipse(px, py, 8 * s, 10 * s, 0, 0, Math.PI * 2);
+  x.fill();
+}
+function art2D(cv, o){
+  const dpr = Math.min(3, devicePixelRatio || 1) * UIZ(), w = cv.clientWidth || 200, h = cv.clientHeight || 110; cv.width = w * dpr; cv.height = h * dpr;
+  const x = cv.getContext('2d'); x.scale(dpr, dpr); const t = TIMES[o.t], sc = o.scene || 'lake', H = h * .62;
+  const gr = x.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, hex(t.top)); gr.addColorStop(1, hex(t.bot)); x.fillStyle = gr; x.fillRect(0, 0, w, h);
+  x.fillStyle = '#f4eedb'; x.beginPath(); x.arc(w * .78, h * .16, Math.max(4, h * .07), 0, Math.PI * 2); x.fill();
+  const tint = {bamboo:['#1f4a3c', .3], temple:['#4a2c48', .15], snow:['#a9b6dd', .35]}[sc];
+  const mix = (a, b, k) => { const A = new THREE.Color(a), B = new THREE.Color(b); return '#' + A.lerp(B, k).getHexString(); };
+  t.ridges.forEach((c, i) => { const col = tint ? mix(hex(c), tint[0], tint[1]) : hex(c); x.fillStyle = col; x.beginPath(); x.moveTo(0, H); let px = 0, k = i * 3 + 1; const peaks = [];
+    while (px < w){ const s = 18 + (k * 37 % 23), py = h * (.3 + i * .07) + (k * 13 % 11); x.lineTo(px + s / 2, py); peaks.push([px + s / 2, py, s]); x.lineTo(px + s, h * (.5 + i * .03)); px += s; k++; }
+    x.lineTo(w, H); x.fill();
+    if (sc === 'snow'){ x.fillStyle = mix(col, '#eef2fc', .7); peaks.forEach(([a, b, s]) => { x.beginPath(); x.moveTo(a, b); x.lineTo(a + s * .16, b + s * .2); x.lineTo(a, b + s * .13); x.lineTo(a - s * .16, b + s * .2); x.fill(); }); } });
+  const wg = x.createLinearGradient(0, H, 0, h); wg.addColorStop(0, hex(t.water[0])); wg.addColorStop(1, hex(t.water[1])); x.fillStyle = wg; x.fillRect(0, H, w, h - H);
+  if (sc === 'temple'){ x.fillStyle = '#1a1d33'; const cx = w * .86, by = H - 2; for (let k = 0; k < 4; k++){ const ww = (14 - k * 3) * h / 110, yy = by - k * 9 * h / 110; x.fillRect(cx - ww * .55, yy - 6 * h / 110, ww * 1.1, 6 * h / 110); x.beginPath(); x.moveTo(cx - ww - 3, yy - 5 * h / 110); x.lineTo(cx + ww + 3, yy - 5 * h / 110); x.lineTo(cx, yy - 10 * h / 110); x.fill(); }
+    x.fillStyle = '#7a2a24'; const tx = w * .12, ty = H + h * .02; x.fillRect(tx - 9, ty - 16, 2.5, 18); x.fillRect(tx + 6.5, ty - 16, 2.5, 18); x.fillRect(tx - 13, ty - 19, 26, 3); x.fillRect(tx - 10, ty - 13, 20, 2); }
+  if (sc === 'bamboo') for (const [bx, s] of [[.04, 1], [.1, .8], [.93, 1], [.86, .8]]){ x.fillStyle = s < 1 ? '#29463d' : '#16261f'; for (let y = h; y > -10; y -= 14){ x.fillRect(w * bx - 2.5 * s, y - 12, 5 * s, 12.5); } x.strokeStyle = x.fillStyle; x.lineWidth = 1.6; x.beginPath(); x.ellipse(w * bx + (bx < .5 ? 8 : -8), h * .35, 9, 2.4, bx < .5 ? .5 : -.5, 0, Math.PI * 2); x.fill(); }
+  if (sc === 'snow'){ x.fillStyle = '#141a2c'; for (const [bx, s] of [[.05, 1], [.95, 1.1]]){ for (let k = 0; k < 3; k++){ const by = h - k * 13 * s, hw = (13 - k * 3) * s; x.beginPath(); x.moveTo(w * bx - hw, by); x.lineTo(w * bx + hw, by); x.lineTo(w * bx, by - 20 * s); x.fill(); } }
+    x.fillStyle = 'rgba(240,244,255,.85)'; const R = seeded('flakes' + w); for (let k = 0; k < 26; k++){ x.beginPath(); x.arc(R() * w, R() * h, .9 + R(), 0, Math.PI * 2); x.fill(); } }
+  if (sc === 'lake'){ x.fillStyle = '#2c4a4f'; [[.18, .86, 12], [.72, .92, 15]].forEach(([a, b, r]) => { x.beginPath(); x.ellipse(w * a, h * b, r, r * .35, 0, 0, Math.PI * 2); x.fill(); }); x.fillStyle = '#f2c1cd'; x.beginPath(); x.ellipse(w * .18, h * .82, 3, 4, 0, 0, Math.PI * 2); x.fill(); }
+  if (o.lamps){ x.strokeStyle = '#1b1712'; x.lineWidth = 1.2; x.beginPath(); x.moveTo(0, h * .1); x.quadraticCurveTo(w / 2, h * .32, w, h * .1); x.stroke();
+    const n = o.lamps.length, s = o.ls || 1; o.lamps.forEach((li, k) => { const fx = n > 1 ? .14 + .72 * k / (n - 1) : .5, px = w * fx, py = h * (.1 + .22 * (1 - Math.pow((fx - .5) / .5, 2)) * .9) + 14 * s;
+      drawLantern2D(x, px, py, s * .85, LAMPS[li].col, o.style || styleId);
+      const rg = x.createLinearGradient(0, h * .66, 0, h); rg.addColorStop(0, LAMPS[li].col + '66'); rg.addColorStop(1, LAMPS[li].col + '00'); x.fillStyle = rg; x.fillRect(px - 3, h * .66, 6, h * .3); }); }
+  if (o.date){ x.font = `700 ${Math.round(h * .11)}px Figtree, sans-serif`; const tw = x.measureText(o.date).width + 12; x.fillStyle = '#fdfcf8'; x.fillRect(8, h - h * .2 - 8, tw, h * .2); x.fillStyle = '#1d2a2c'; x.textBaseline = 'middle'; x.fillText(o.date, 14, h - h * .1 - 8); }
+}
+function styleTile(cv, id){
+  const dpr = Math.min(3, devicePixelRatio || 1) * UIZ(), w = cv.clientWidth || 60, h = cv.clientHeight || 58; cv.width = w * dpr; cv.height = h * dpr;
+  const x = cv.getContext('2d'); x.scale(dpr, dpr); const g = x.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#141b38'); g.addColorStop(1, '#2c3263'); x.fillStyle = g; x.fillRect(0, 0, w, h);
+  x.strokeStyle = '#0b0d18'; x.lineWidth = 1; x.beginPath(); x.moveTo(0, 7); x.quadraticCurveTo(w / 2, 13, w, 7); x.stroke(); x.beginPath(); x.moveTo(w / 2, 10); x.lineTo(w / 2, 16); x.stroke();
+  drawLantern2D(x, w / 2, h * .58, Math.min(1.5, h / 40), '#d9583b', id);
+}
+
+// ================= home =================
+const CARD_ART = {classic:{t:1, lamps:[0, 1, 2, 3]}, melody:{t:2, lamps:[0, 1, 2, 3, 4, 5, 6], ls:.75}, daily:{t:0, lamps:[0, 1, 2, 3, 4], ls:.85, date:true}, reverse:{t:3, lamps:[3, 2, 1, 0]}, zen:{t:4, lamps:[0, 1, 2, 3]}};
+function cardMeta(id){
+  if (id === 'melody') return `Tunes<b>${store.tunes.length}/${TUNES.length}</b><i>·</i>Best<b>${hiOf(id)}</b>`;
+  if (id === 'daily'){ const done = store.daily.last === dayKey(); return `Streak<b>${dailyStreak()}</b><i>·</i>${done ? '<span class="ok">Played today</span>' : 'New today'}`; }
+  return `Best<b>${hiOf(id)}</b><i>·</i>Longest<b>${bestOf(id)}</b>`;
+}
+let shelfMode = 'classic';
+function buildShelf(){
+  $('shelf').innerHTML = MODE_IDS.map(id => `<button class="mcard" data-mode="${id}"><span class="art"><canvas></canvas></span><b>${MODES[id].name}</b><p>${MODES[id].desc}</p><span class="meta">${cardMeta(id)}</span></button>`).join('');
+  $('dots').innerHTML = MODE_IDS.map(() => '<i></i>').join('');
+  const date = new Date().toLocaleDateString('en', {month:'short', day:'numeric'});
+  requestAnimationFrame(() => [...$('shelf').children].forEach(c => art2D(c.querySelector('canvas'), Object.assign({scene:sceneId, date:CARD_ART[c.dataset.mode].date ? date : ''}, CARD_ART[c.dataset.mode], {date:CARD_ART[c.dataset.mode].date ? date : ''}))));
+}
+function focusShelf(id, smooth){ shelfMode = id; const card = $('shelf').children[MODE_IDS.indexOf(id)]; if (card) $('shelf').scrollTo({left:card.offsetLeft - ($('shelf').clientWidth - card.offsetWidth) / 2, behavior:smooth ? 'smooth' : 'auto'}); paintShelf(); }
+function paintShelf(){ [...$('shelf').children].forEach(c => c.classList.toggle('on', c.dataset.mode === shelfMode)); [...$('dots').children].forEach((d, i) => d.classList.toggle('on', MODE_IDS[i] === shelfMode)); }
+let shelfT = 0;
+$('shelf').addEventListener('scroll', () => { const sh = $('shelf'), mid = sh.scrollLeft + sh.clientWidth / 2; let bid = shelfMode, bd = 1e9;
+  for (const c of sh.children){ const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd){ bd = d; bid = c.dataset.mode; } }
+  if (bid !== shelfMode){ shelfMode = bid; paintShelf(); clearTimeout(shelfT); shelfT = setTimeout(() => Sfx.tick(), 60); } }, {passive:true});
+$('shelf').addEventListener('click', e => { const c = e.target.closest('[data-mode]'); if (!c) return; Sfx.unlock(); if (c.dataset.mode === shelfMode) startPlay(); else focusShelf(c.dataset.mode, true); });
+const paintNewDot = () => { $('collectBtn').querySelector('.dot').hidden = !store.newUnl; };
+function showHome(){
+  persist(); buildShelf(); paintSound(); paintNewDot(); requestAnimationFrame(() => focusShelf(mode, false));
+  $('overlay').hidden = $('pause').hidden = $('coach').hidden = $('collect').hidden = true; $('home').hidden = false; $('hud').hidden = $('cue').hidden = true;
+  phase = 'idle'; over = false; timeIdx = 1; lampNote = PENTA.slice(); layoutLamps(5, false);
+  if (floats.length < 3) for (let k = floats.length; k < 3; k++) spawnFloat(k * 2 + 1, .15 + k * .25);
+}
+function startPlay(){
+  Sfx.unlock(); mode = shelfMode; M = MODES[mode];
+  $('home').hidden = true; $('hud').hidden = $('cue').hidden = false; newGame(); persist();
+  if (!store.seen) $('coach').hidden = false;
+}
+$('playBtn').onclick = startPlay;
+// collection: lantern styles and scenes, unlocked by playing
+const LOCK = '<span class="lk"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>';
+function paintCollect(){
+  $('cSub').textContent = `${store.notes} notes played · ${store.tunes.length} of ${TUNES.length} melodies · streak ${dailyStreak()}`;
+  const tile = (it, kind, on) => `<button class="tile${on ? ' on' : ''}${isOpen(it) ? '' : ' lock'}" data-k="${kind}" data-id="${it.id}"><canvas></canvas><span>${it.name}</span>${isOpen(it) ? '' : LOCK}</button>`;
+  $('cStyles').innerHTML = STYLES.map(s => tile(s, 'style', s.id === styleId)).join('');
+  $('cScenes').innerHTML = SCENES.map(s => tile(s, 'scene', s.id === sceneId)).join('');
+  requestAnimationFrame(() => { [...$('cStyles').children].forEach(b => styleTile(b.querySelector('canvas'), b.dataset.id)); [...$('cScenes').children].forEach(b => art2D(b.querySelector('canvas'), {t:1, scene:b.dataset.id, lamps:[0, 1, 2, 3], ls:.6})); });
+}
+$('collectBtn').onclick = () => { Sfx.unlock(); store.newUnl = false; persist(); paintNewDot(); paintCollect(); $('cHint').innerHTML = 'Tap one to use it. Locked ones open as you play.'; $('collect').hidden = false; };
+$('collect').addEventListener('click', e => {
+  if (e.target === $('collect')){ $('cDone').click(); return; }
+  const b = e.target.closest('.tile'); if (!b) return; Sfx.tick();
+  const list = b.dataset.k === 'style' ? STYLES : SCENES, it = list.find(s => s.id === b.dataset.id);
+  if (!isOpen(it)){ $('cHint').innerHTML = `<b>${it.label}</b>: ${it.req.text} (${Math.min(progressOf(it.req), it.req.n)}/${it.req.n})`; return; }
+  if (b.dataset.k === 'style') applyStyle(it.id); else applyScene(it.id);
+  persist(); paintCollect(); $('cHint').innerHTML = `<b>${it.label}</b> set.`;
+});
+$('cDone').onclick = () => { $('collect').hidden = true; buildShelf(); requestAnimationFrame(() => focusShelf(shelfMode, false)); };
+
+// ================= input: tap a lantern; the view leans a little with the pointer =================
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+host.addEventListener('pointerdown', e => {
+  Sfx.unlock(); if (!$('home').hidden) return;
+  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera);
+  const vis = lamps.slice(0, lampCount); const hits = ray.intersectObjects(vis, true);
+  let l = null; if (hits.length){ let o = hits[0].object; while (o.parent && !vis.includes(o)) o = o.parent; l = vis.includes(o) ? o : null; }
+  if (!l){ // forgiving: the nearest lantern body within a thumb's reach
+    let bd = 1e9; for (const ll of vis){ proj.set(ll.position.x, ll.position.y + ll.userData.bodyY * ll.scale.y, ll.position.z).project(camera); const d = Math.hypot((proj.x + 1) / 2 * innerWidth - e.clientX, (1 - proj.y) / 2 * innerHeight - e.clientY); if (d < bd){ bd = d; l = ll; } }
+    if (bd > 75) l = null; }
+  tapLamp(l);
+});
+addEventListener('keydown', e => { if (e.code === 'KeyP' || e.code === 'Escape'){ if (paused) resumeGame(); else pauseGame(); return; } const k = '1234567'.indexOf(e.key); if (k >= 0 && k < lampCount){ Sfx.unlock(); tapLamp(lamps[k]); } });
+const par = {x:0, y:0, tx:0, ty:0};
+addEventListener('pointermove', e => { if (e.pointerType !== 'mouse') return; par.tx = e.clientX / innerWidth - .5; par.ty = e.clientY / innerHeight - .5; }, {passive:true});
+if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission !== 'function')
+  addEventListener('deviceorientation', e => { if (e.gamma == null) return; par.tx = Math.max(-.5, Math.min(.5, e.gamma / 40)); par.ty = Math.max(-.5, Math.min(.5, (e.beta - 50) / 50)); }, {passive:true});
+
+// ================= frame =================
+let last = 0;
+const ease = k => 1 - Math.pow(1 - k, 3);
+function frame(ts){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.05, (ts - (last || ts)) / 1000); last = ts; now = ts; const T = now / 1000;
+  update(dt); applyTime(dt);
+  for (const l of lamps){ if (!l.visible) continue; const u = l.userData, s = (now - u.sing) / 1000, w = (now - u.wrong) / 1000, j = (now - u.join) / 1000, hn = (now - u.hint) / 1000, wv = (now - u.wave) / 1000;
+    const k = Math.min(1, dt * 6); u.x += (u.tx - u.x) * k; u.s += (u.ts - u.s) * k; l.scale.setScalar(u.s);
+    l.position.set(u.x, ropeY(u.x), .1);
+    const by = l.position.y + u.bodyY * u.s;
+    // a new lantern waits dark while an ember floats up from the water and lights it
+    const ARR = 1.2; let birth = 1;
+    if (j < ARR){ birth = 0; const e = ease(Math.max(0, j) / ARR); u.emb.visible = true; u.emb.position.set(u.x + Math.sin(j * 5) * .2 * (1 - e), HORIZON - .7 + (by - HORIZON + .7) * e, .5); u.emb.scale.setScalar(.55 + Math.sin(j * 23) * .07); u.emb.material.opacity = 1; }
+    else { u.emb.visible = false; if (!u.arrived){ u.arrived = true; u.sing = now; Sfx.note(lampNote[u.i], .7); ember(l); } }
+    // the light: a warm bloom when it sounds, a flicker when it was the wrong one, a slow breath otherwise
+    const target = s < .5 ? 1 - s / .5 : 0, breath = .06 + Math.sin(now / 900 + u.idle) * .03;
+    u.light = Math.max(u.light * Math.pow(.02, dt), target);
+    const flick = w < .45 ? (Math.random() < .5 ? -.12 : 0) : 0, hint = hn < .9 ? Math.abs(Math.sin(hn * 7)) * .5 : 0, wave = wv > 0 && wv < .7 ? Math.sin(wv / .7 * Math.PI) * .9 : 0;
+    const lit = Math.max(0, (breath + u.light * 2.4 + hint + flick + wave) * birth); u.lit = lit;
+    u.mat.emissiveIntensity = .16 + lit; u.halo.material.opacity = .1 + lit * .38; u.halo.scale.setScalar(1.6 + (u.light + wave * .5) * 1.2);
+    // swing on its string: a nudge when it sounds, a shiver when it's wrong
+    u.swing.rotation.z = (s < 1.6 ? Math.sin(s * 7) * .16 * Math.exp(-s * 2.2) : 0) + (w < .4 ? Math.sin(w * 50) * .05 : 0) + Math.sin(now / 1700 + u.idle) * .015;
+    // its reflection: a long soft streak on the water, broken by ripples, and a pool of light where it meets the water
+    const ry = HORIZON - (by - HORIZON) * .55 - .3;
+    u.refl.position.set(u.x + Math.sin(now / 400 + u.idle) * .03, Math.min(HORIZON - .3, ry), -2.2); u.refl.scale.set(.5 + u.light * .45, 1.5 + u.light * 1.5, 1); u.refl.material.opacity = (.12 + lit * .55) * (.85 + Math.sin(now / 160 + u.idle) * .15);
+    u.spill.position.set(u.x, HORIZON - .34, -2.25); u.spill.scale.set(1.5 + u.light * 1.1, .34 + u.light * .12, 1); u.spill.material.opacity = Math.min(.55, lit * .2);
+  }
+  for (let i = embers.length - 1; i >= 0; i--){ const m = embers[i]; m.t += dt; if (m.t < 0){ m.e.visible = false; continue; } m.e.visible = true;
+    m.e.position.y += dt * .7; m.e.position.x += (m.vx + Math.sin(m.t * 5) * .1) * dt; m.e.material.opacity = Math.max(0, .9 - m.t * .7); m.e.scale.setScalar(.16 * (1 - m.t * .4));
+    if (m.t > 1.3){ scene.remove(m.e); m.e.material.dispose(); embers.splice(i, 1); } }
+  // sky: twinkle, a sparkle that sweeps across after a good round, shooting stars
+  const sp = (now - sparkleT) / 1000;
+  stars.forEach(s => { const tw = .6 + Math.sin(now / 600 + s.userData.tw) * .4; let b = 0; if (sp < 2.2){ const d = sp - (s.position.x + 8) / 16 * 1.1; b = d > 0 && d < .55 ? Math.sin(d / .55 * Math.PI) : 0; }
+    s.scale.setScalar(s.userData.s * (cur.stars * tw + b * 1.3)); s.visible = cur.stars > .02 || b > 0; });
+  if (shoot.t >= 1 && cur.stars > .3 && Math.random() < cur.shoot * dt) spawnShoot();
+  if (shoot.t < 1){ shoot.t += dt; const d = shoot.t * 7; shooter.position.set(shoot.x + shoot.dx * d, shoot.y + shoot.dy * d, -12.4); shooter.material.opacity = Math.sin(Math.min(1, shoot.t) * Math.PI) * .9; if (shoot.t >= 1) shooter.visible = false; }
+  aurora.forEach((a, i) => { if (a.material.opacity < .005) return; const p = a.geometry.attributes.position, b = a.userData.base; for (let k = 0; k < p.count; k++){ p.array[k * 3 + 1] = b[k * 3 + 1] + Math.sin(b[k * 3] * .5 + now / 1500 + i) * .35; } p.needsUpdate = true; });
+  // water: ripple strips, rising fish, a koi, the moon path, the boat
+  ripples.forEach(r => { r.position.x += r.userData.v * dt; if (r.position.x > 6) r.position.x = -6; if (r.position.x < -6) r.position.x = 6; });
+  if (sceneId !== 'snow' && Math.random() < dt * .3) rise((Math.random() - .5) * 7, HORIZON - .4 - Math.random() * 3.6, .6 + Math.random() * .5);
+  for (const r of rings){ if (r.t > 3){ r.m.visible = false; continue; } r.t += dt; const q = r.t / 3, persp = 1 + (HORIZON - r.y) * .25, rad = (.06 + q * .85 * r.big) * persp;
+    r.m.scale.set(rad, rad * .2, 1); r.m.position.set(r.x, r.y, -2.15); r.m.material.opacity = (1 - q) * (1 - q) * .45; }
+  koi.next -= dt;
+  if (!koi.on && koi.next <= 0 && sceneId !== 'snow'){ const dir = Math.random() < .5 ? 1 : -1; Object.assign(koi, {on:true, t:0, dur:9 + Math.random() * 5, dir, y:HORIZON - 1.4 - Math.random() * 2.6, x0:-dir * 4.4, half:false}); koi.m.material.color.copy(L_(Math.random() < .7 ? '#e07a43' : '#e8e2d6')); koi.m.visible = true; koi.m.scale.set(dir, .5, 1); }
+  if (koi.on){ koi.t += dt; const q = koi.t / koi.dur, x = koi.x0 + koi.dir * 8.8 * q, y = koi.y + Math.sin(q * Math.PI * 2.4) * .18;
+    koi.m.position.set(x, y, -2.24); koi.m.rotation.z = Math.cos(q * Math.PI * 2.4) * .12 * koi.dir; koi.m.scale.y = .5 * (1 + Math.sin(koi.t * 7) * .04); koi.m.material.opacity = Math.sin(Math.min(1, q) * Math.PI) * .3;
+    if (!koi.half && q > .5){ koi.half = true; rise(x, y, .9); }
+    if (q >= 1){ koi.on = false; koi.m.visible = false; koi.next = 10 + Math.random() * 14; } }
+  // fireflies: few at dusk, many in the deep night, gone in snow
+  if (fireflies.m.visible){ const pa = fireflies.m.geometry.attributes.position, ca = fireflies.m.geometry.attributes.color, act = cur.fire * fireflies.n;
+    fireflies.data.forEach((f, i) => { pa.array[i * 3] = f.x + Math.sin(T * f.sp + f.ph) * .7; pa.array[i * 3 + 1] = f.y + Math.sin(T * f.sp * 1.4 + f.ph * 2) * .3; pa.array[i * 3 + 2] = f.z;
+      const bl = Math.pow(Math.max(0, Math.sin(T * f.bl + f.ph)), 3) * Math.max(0, Math.min(1, act - i)); ca.array[i * 3] = ffCol.r * bl; ca.array[i * 3 + 1] = ffCol.g * bl; ca.array[i * 3 + 2] = ffCol.b * bl; });
+    pa.needsUpdate = ca.needsUpdate = true; }
+  // lanterns set adrift drift off toward the far shore and fade
+  for (let i = floats.length - 1; i >= 0; i--){ const f = floats[i]; f.k += dt / f.dur; const k = Math.min(1, f.k), sc = 1 - k * .7;
+    f.x += f.vx * dt * sc; const y = -5.1 + (HORIZON - .3 + 5.1) * (1 - Math.pow(1 - k, 1.4)), fade = Math.min(1, f.k * 25, (1 - k) * 8);
+    f.g.position.set(f.x, y + Math.sin(T * 1.3 + f.ph) * .02, -.3 - 1.8 * k); f.g.scale.setScalar(sc); f.g.rotation.z = Math.sin(T * .9 + f.ph) * .04;
+    f.mat.opacity = fade; f.mat.emissiveIntensity = (.7 + Math.sin(T * 9 + f.ph) * .05 + Math.sin(T * 2.3 + f.ph) * .1) * fade; f.glow.material.opacity = .4 * fade;
+    f.refl.position.set(f.x, y - .3 * sc - .25, -2.2); f.refl.scale.set(.35 * sc, 1.1 * sc, 1); f.refl.material.opacity = .28 * fade;
+    if (f.k >= 1){ scene.remove(f.g); scene.remove(f.refl); f.mat.dispose(); f.glow.material.dispose(); f.refl.material.dispose(); floats.splice(i, 1); } }
+  // lantern light spills onto the nearby lily pads
+  pads.forEach(p => { p.position.y = p.userData.y + Math.sin(now / 1400 + p.userData.p) * .015; if (!p.visible) return; let r = 0, g = 0, b = 0;
+    for (let i = 0; i < lampCount; i++){ const u = lamps[i].userData; if (!u.lit) continue; const q = u.lit * Math.exp(-Math.pow(p.position.x - u.x, 2) / 1.6) * Math.exp(-(p.position.y - HORIZON) * -.12) * .16, c = lamps[i].userData.mat.color; r += c.r * q; g += c.g * q; b += c.b * q; }
+    p.userData.leaf.material.emissive.setRGB(r, g, b); });
+  moonPath.material.opacity = (.1 + Math.sin(now / 700) * .03) * (.5 + cur.moonE * .6); moonPath.position.x = moon.position.x;
+  boat.position.x += dt * .05; if (boat.position.x > 5.5) boat.position.x = -5.5; boat.rotation.z = Math.sin(now / 1200) * .02;
+  boatLight.material.opacity = .5 + Math.sin(T * 7) * .05 + Math.sin(T * 2.1) * .08; boatRefl.position.set(boat.position.x - .22 * .7, HORIZON - .62, -2.95); boatRefl.material.opacity = .22 + Math.sin(T * 3) * .05;
+  reeds.forEach((r, i) => r.rotation.z = Math.sin(now / 1500 + i * 2) * .015);
+  mists.forEach(m => { m.material.map.offset.x += m.userData.v * dt; });
+  if (sceneId === 'snow' && sceneParts.snow){ const S = sceneParts.snow.userData.snow; S.data.forEach((f, i) => { f.y -= f.v * dt; if (f.y < -6.5) f.y = 7; S.p[i * 3] = f.x + Math.sin(T * .6 + f.ph) * .3; S.p[i * 3 + 1] = f.y; S.p[i * 3 + 2] = f.z; }); S.flakes.geometry.attributes.position.needsUpdate = true; }
+  if (sceneId === 'bamboo' && sceneParts.bamboo) sceneParts.bamboo.children.forEach((c, i) => { if (i < 4) c.rotation.z = Math.sin(T * .5 + i) * .006; });
+  if (sceneId === 'temple' && sceneParts.temple){ const [wg, win] = sceneParts.temple.userData.flick; wg.material.opacity = .45 + Math.sin(T * 6.3) * .04 + Math.sin(T * 1.7) * .06; }
+  // camera: a slow breath, and a small lean toward the pointer or the tilt of the phone
+  par.x += (par.tx - par.x) * Math.min(1, dt * 2.5); par.y += (par.ty - par.y) * Math.min(1, dt * 2.5);
+  camera.position.x = par.x * .55 + Math.sin(T * .21) * .07 + (shake > 0 ? (Math.random() - .5) * shake : 0); camera.position.y = -par.y * .3 + Math.sin(T * .15) * .05; camera.lookAt(camLook);
+  shake *= .85; if (shake < .003) shake = 0;
+  Sfx.ambient(dt);
+  renderer.render(scene, camera);
+}
+
+// ================= sound: soft struck bells, a kalimba-like tone, and a quiet night around them =================
+const Sfx = (() => {
+  let ac = null, out = null, verb = null, amb = null;
+  const unlock = () => { if (ac){ if (ac.state === 'suspended' && document.visibilityState === 'visible') ac.resume(); return; } try {
+    ac = new (window.AudioContext || window.webkitAudioContext)(); out = ac.createGain(); out.gain.value = .55; out.connect(ac.destination);
+    // a short feedback echo gives the lake some air
+    verb = ac.createDelay(); verb.delayTime.value = .19; const fb = ac.createGain(); fb.gain.value = .28; const wet = ac.createGain(); wet.gain.value = .22; verb.connect(fb); fb.connect(verb); verb.connect(wet); wet.connect(out);
+    startAmb();
+  } catch(e){} };
+  function tone(f0, f1, dur, type = 'sine', vol = .15, delay = 0, dest){
+    if (!ac || !sound) return; const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), gn = ac.createGain(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .006); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(dest || out); if (verb && !dest) gn.connect(verb); o.start(t); o.stop(t + dur + .03);
+  }
+  function noise(dur, vol, f){ if (!ac || !sound) return; const t = ac.currentTime, b = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+    const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), gn = ac.createGain(); s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; gn.gain.value = vol; s.connect(bp); bp.connect(gn); gn.connect(out); s.start(t); }
+  const hz = n => 330 * Math.pow(2, n / 12);   // E4 up
+  // ---- ambience: water lapping, a breeze, crickets, dawn birds, a far temple bell; all synthesized ----
+  function startAmb(){
+    const len = ac.sampleRate * 4, buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0); let b0 = 0, b1 = 0, b2 = 0;
+    for (let i = 0; i < len; i++){ const w = Math.random() * 2 - 1; b0 = .99765 * b0 + w * .099046; b1 = .963 * b1 + w * .2965164; b2 = .57 * b2 + w * 1.0526913; d[i] = (b0 + b1 + b2 + w * .1848) * .16; }
+    const master = ac.createGain(); master.gain.value = 0; master.connect(ac.destination);
+    const lfo = (freq, depth, param) => { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = freq; g.gain.value = depth; o.connect(g); g.connect(param); o.start(); };
+    const bed = (type, f, q, rate) => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.playbackRate.value = rate; const fl = ac.createBiquadFilter(); fl.type = type; fl.frequency.value = f; fl.Q.value = q;
+      const sw = ac.createGain(); sw.gain.value = .6; const lv = ac.createGain(); lv.gain.value = 0; s.connect(fl); fl.connect(sw); sw.connect(lv); lv.connect(master); s.start(ac.currentTime + Math.random() * .5, Math.random() * 3); return {fl, sw, lv}; };
+    const water = bed('lowpass', 420, .4, .9), wind = bed('bandpass', 650, .8, .7);
+    lfo(.19, .35, water.sw.gain); lfo(.07, .3, wind.sw.gain); lfo(.05, 260, wind.fl.frequency);
+    amb = {buf, master, water, wind, t:0, nextCricket:0, nextLap:0, nextBird:0, nextBell:0};
+  }
+  const pan = dest => { if (!ac.createStereoPanner) return dest; const p = ac.createStereoPanner(); p.pan.value = Math.random() * 1.6 - .8; p.connect(dest); return p; };
+  function cricket(lv){ const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = 4300 + Math.random() * 900; g.gain.value = 0; o.connect(g); g.connect(pan(amb.master));
+    const n = 3 + Math.floor(Math.random() * 3); for (let k = 0; k < n; k++){ const s = t + k * .056; g.gain.setValueAtTime(0, s); g.gain.linearRampToValueAtTime(.0075 * lv, s + .008); g.gain.linearRampToValueAtTime(0, s + .034); }
+    o.start(t); o.stop(t + n * .056 + .05); }
+  function lap(lv){ const t = ac.currentTime, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain(); s.buffer = amb.buf; f.type = 'bandpass'; f.frequency.value = 300 + Math.random() * 350; f.Q.value = 1.4;
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.09 * lv, t + .08); g.gain.exponentialRampToValueAtTime(.0005, t + .5); s.connect(f); f.connect(g); g.connect(pan(amb.master)); s.start(t, Math.random() * 3, .6); }
+  function bird(lv){ const t = ac.currentTime, dest = pan(amb.master), n = 2 + Math.floor(Math.random() * 3), f0 = 2300 + Math.random() * 900;
+    for (let k = 0; k < n; k++){ const o = ac.createOscillator(), g = ac.createGain(), s = t + k * .14; o.frequency.setValueAtTime(f0, s); o.frequency.exponentialRampToValueAtTime(f0 * (1.25 + Math.random() * .3), s + .07);
+      g.gain.setValueAtTime(0, s); g.gain.linearRampToValueAtTime(.008 * lv, s + .015); g.gain.linearRampToValueAtTime(0, s + .09); o.connect(g); g.connect(dest); o.start(s); o.stop(s + .1); } }
+  function bell(){ [[1, .022], [2.01, .01], [2.76, .008], [5.4, .003]].forEach(([m, v]) => tone(98 * m, 98 * m * .998, 5 - m * .4, 'sine', v, 0, amb.master)); }
+  function ambient(dt){
+    if (!amb) return; amb.t += dt; if (amb.t < .25) return; amb.t = 0;
+    const t = ac.currentTime, mul = SCENE_AMB[sceneId] || SCENE_AMB.lake, lv = cur.amb.map((v, i) => v * mul[i]);
+    amb.master.gain.setTargetAtTime(sound ? .9 : 0, t, .3);
+    amb.water.lv.gain.setTargetAtTime(.075 * lv[0], t, 1.2); amb.wind.lv.gain.setTargetAtTime(.05 * lv[1], t, 1.5);
+    if (!sound || ac.state !== 'running') return;
+    if (t > amb.nextCricket){ if (lv[2] > .05) cricket(lv[2]); amb.nextCricket = t + .35 + Math.random() * 1.4 / Math.max(.3, lv[2]); }
+    if (t > amb.nextLap){ if (lv[0] > .1) lap(lv[0]); amb.nextLap = t + 1.6 + Math.random() * 3.4; }
+    if (t > amb.nextBird){ if (lv[3] > .1) bird(lv[3]); amb.nextBird = t + 2.2 + Math.random() * 5; }
+    if (sceneId === 'temple' && t > amb.nextBell){ if (amb.nextBell) bell(); amb.nextBell = t + 20 + Math.random() * 22; }
+  }
+  return {unlock, ambient,
+    mute:() => { if (amb) amb.master.gain.setTargetAtTime(sound ? .9 : 0, ac.currentTime, .05); },
+    sleep:() => { if (ac && ac.state === 'running') ac.suspend(); },
+    wake:() => { if (ac && ac.state === 'suspended') ac.resume(); },
+    note:(n, v = 1) => { const f = hz(n); tone(f, f, 1.1, 'sine', .2 * v); tone(f * 2.76, f * 2.76, .4, 'sine', .045 * v); tone(f * 5.4, f * 5.4, .14, 'sine', .018 * v); },
+    wrong:() => { tone(150, 110, .3, 'triangle', .1); noise(.2, .06, 600); },
+    join:() => [0, 7, 12, 16].forEach((s, i) => tone(hz(s), hz(s), .9, 'sine', .07, i * .11)),
+    chime:() => { tone(hz(24), hz(24), .5, 'sine', .028, .05); tone(hz(31), hz(31), .45, 'sine', .02, .13); },
+    win:() => [12, 16, 19, 24].forEach((s, i) => tone(hz(s), hz(s), 1.2, 'sine', .035, i * .09)),
+    tick:() => noise(.04, .05, 2500),
+    lose:() => [7, 4, 0, -5].forEach((s, i) => tone(hz(s), hz(s) * .99, .9, 'sine', .09, i * .2)),
+  };
+})();
+
+// ================= start =================
+paintSound(); resize();
+const splashT0 = performance.now(); $('splashBar').style.width = '50%';
+const begin = () => {
+  $('splashBar').style.width = '100%'; mode = MODES[store.mode] ? store.mode : 'classic'; M = MODES[mode]; shelfMode = mode;
+  styleId = STYLES.some(s => s.id === store.style && isOpen(s)) ? store.style : 'round';
+  timeIdx = 1; layoutLamps(5, false); applyStyle(styleId); applyScene(SCENES.some(s => s.id === store.scene && isOpen(s)) ? store.scene : 'lake'); showHome();
+  requestAnimationFrame(frame);
+  setTimeout(() => { $('splash').classList.add('out'); setTimeout(() => $('splash').remove(), 550); }, Math.max(0, 1500 - (performance.now() - splashT0)));
+};
+(document.fonts && document.fonts.load ? Promise.all([document.fonts.load("800 60px Fraunces"), document.fonts.load("600 16px Figtree")]).catch(() => {}) : Promise.resolve()).then(begin);
+})();
+</script>
+<script>// Runs inside each game page, after the game's own code. It adds a way back to the arcade and turns finished rounds into XP.
+(() => {
+  const GAME = window.ARCADE_GAME, A = window.Arcade, P = window.PLATFORM || (window.PLATFORM = {});
+  if (!GAME || !A) return;
+  A.state.last = GAME; A.save();
+
+  // back to the arcade: a key in the game's own top bar, drawn in that game's own style
+  const top = document.getElementById('homeTop');
+  if (top){
+    // borrow the class of the game's own top-bar buttons ('key' in most games, 'chip' in Tightrope)
+    const own = top.querySelector('button'), cls = own && own.classList.contains('chip') ? 'chip' : 'key';
+    const b = document.createElement('button'); b.className = cls; b.id = 'arcadeBack'; b.setAttribute('aria-label', 'Back to all games');
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6"/></svg><span>Games</span>';
+    b.onclick = e => { e.stopPropagation(); location.href = '../index.html'; };
+    top.prepend(b);
+    // Tightrope's chips are light-on-dark: its icons are white, so the label is too
+    if (cls === 'chip') b.style.color = '#fff';
+  }
+  const css = document.createElement('style');
+  css.textContent = `#arcadeBack{margin-right:auto;display:inline-flex;align-items:center;gap:4px;padding:0 14px 0 8px!important;font-weight:700;font-size:15px}
+    #arcadeBack svg{width:20px;height:20px}
+    #homeTop{justify-content:flex-end}
+    .arcadeToast{position:fixed;left:50%;top:calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
+      font:700 14px/1.2 system-ui,-apple-system,sans-serif;color:#fff;animation:arcIn .35s cubic-bezier(.2,1.4,.4,1) both, arcOut .4s ease 3.4s forwards}
+    .arcadeToast b{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;background:rgba(20,18,40,.88);box-shadow:0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+    .arcadeToast b i{font-style:normal;color:#ffd23f}
+    .arcadeToast small{padding:6px 12px;border-radius:999px;background:rgba(62,224,197,.92);color:#0d2a26;font-weight:800;white-space:nowrap}
+    @keyframes arcIn{from{opacity:0;transform:translate(-50%,-14px) scale(.9)}}
+    @keyframes arcOut{to{opacity:0;transform:translate(-50%,-10px)}}`;
+  // no text selection, magnifier loupe or callout on a long press in any game (iOS shows them on plain text otherwise)
+  css.textContent += `*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}input,textarea{-webkit-user-select:text;user-select:text}`;
+  addEventListener('contextmenu', e => e.preventDefault()); document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+  document.head.appendChild(css);
+
+  // every finished round counts toward the player's arcade level and today's missions
+  const orig = P.onGameOver;
+  P.onGameOver = function(r){
+    let res = null; try { res = A.report(GAME, r); } catch(e){}
+    if (res) setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'arcadeToast';
+      t.innerHTML = `<b><i>+${res.gain} XP</i>${res.levelUp ? ` · Level ${res.levelUp}!` : ''}</b>` + res.done.map(d => `<small>✓ ${d}</small>`).join('');
+      document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+    }, 900);
+    return orig ? orig.apply(this, arguments) : undefined;
+  };
+})();
+</script>
+</body>
+</html>

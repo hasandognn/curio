@@ -1,0 +1,6 @@
+# Only the built web site is published (GitHub Pages).
+/build.py
+/src/
+/assets/
+/dist/
+.DS_Store

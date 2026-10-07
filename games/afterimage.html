@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.ARCADE_GAME = "afterimage";
+// Curio: the shared layer every page loads (the hub and each game).
+// One save ('arcade-v1') holds the player's level, daily missions and streak; each game keeps its own save untouched.
+window.Arcade = (() => {
+  const KEY = 'arcade-v1';
+  const GAMES = [
+    {id:'neon-2048', name:'Neon 2048', blurb:'Slide and merge tiles of light', color:'#ff8a3d', cat:'puzzle'},
+    {id:'neon-blocks', name:'Neon Blocks', blurb:'Stack, clear and light up the well', color:'#ff4d8d', cat:'puzzle'},
+    {id:'neon-orbit', name:'Neon Orbit', blurb:'Turn the ring, fire, light up the core', color:'#ffd23f', cat:'reflex'},
+    {id:'neon-fuse', name:'Neon Fuse', blurb:'Turn the wires, keep the spark alive', color:'#3ee0c5', cat:'puzzle'},
+    {id:'neon-tilt', name:'Neon Tilt', blurb:'Tilt the board, roll every ball home', color:'#5aa9ff', cat:'puzzle'},
+    {id:'paper-echo', name:'Paper Echo', blurb:'Paper birds sing, you sing it back', color:'#f2b84b', cat:'calm'},
+    {id:'afterimage', name:'Afterimage', blurb:'Your past self is right behind you', color:'#8f7bff', cat:'reflex'},
+    {id:'halves', name:'Halves', blurb:'One swipe, two equal halves', color:'#ffd400', cat:'puzzle'},
+    {id:'tightrope', name:'Tightrope', blurb:'Keep your balance high above the city', color:'#ff6b5b', cat:'reflex'},
+    {id:'lily', name:'Lily', blurb:'A frog, a pond, a night of fireflies', color:'#e8c26a', cat:'reflex'},
+    {id:'steep', name:'Steep', blurb:'A little tea house, poured by hand', color:'#d9733f', cat:'calm'},
+    {id:'deckload', name:'Deckload', blurb:'Load her up, keep her level', color:'#e8a33a', cat:'physics'},
+    {id:'tidepool', name:'Tidepool', blurb:'Send the tide, settle every creature', color:'#3fb8c4', cat:'puzzle'},
+    {id:'kite', name:'Kite', blurb:'Ride the gusts, mind the line', color:'#ff7a59', cat:'reflex'},
+    {id:'neon-pour', name:'Neon Pour', blurb:'Pour the light, sort every colour', color:'#c86bff', cat:'puzzle'},
+    {id:'neon-bolts', name:'Neon Bolts', blurb:'Spin the nuts, light every bolt', color:'#3ee0c5', cat:'puzzle'},
+    {id:'pottery', name:'Pottery', blurb:'Throw it, fire it, put it on the shelf', color:'#d9733f', cat:'calm'},
+  ];
+  // shelf tabs, in the order they appear
+  const CATS = [{id:'puzzle', name:'Puzzle'}, {id:'reflex', name:'Reflex'}, {id:'calm', name:'Calm'}, {id:'physics', name:'Build'}];
+  const byId = Object.fromEntries(GAMES.map(g => [g.id, g]));
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const dayNum = s => Math.round(new Date(s + 'T12:00:00').getTime() / 864e5);
+
+  let S;
+  function load(){
+    try { S = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ S = null; }
+    S = Object.assign({xp:0, runs:{}, best:{}, played:0, streak:{last:'', days:0}, daily:null, last:null, noads:false, seen:false}, S || {});
+  }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+  load();
+
+  // levels: each one asks a little more than the last
+  const need = L => 100 + (L - 1) * 40;
+  function level(){ let L = 1, x = S.xp; while (x >= need(L)){ x -= need(L); L++; } return {level:L, into:x, need:need(L)}; }
+
+  // three missions a day, from three different games, the same for the whole day
+  function rng(seed){ let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function daily(){
+    const d = today();
+    if (S.daily && S.daily.date === d) return S.daily;
+    const R = rng(dayNum(d) * 7919), pool = GAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const list = pool.slice(0, 3).map((g, i) => {
+      const best = S.best[g.id] || 0, kind = i === 0 ? 'play' : best > 0 && R() < .6 ? 'score' : i === 2 ? 'best' : 'play';
+      if (kind === 'score') return {game:g.id, kind, target:Math.max(1, Math.round(best * (.45 + R() * .2))), prog:0, done:false};
+      if (kind === 'best') return {game:g.id, kind, target:1, prog:0, done:false};
+      return {game:g.id, kind:'play', target:2 + Math.floor(R() * 2), prog:0, done:false};
+    });
+    S.daily = {date:d, list, bonus:false}; save(); return S.daily;
+  }
+  const missionText = m => { const n = byId[m.game].name;
+    return m.kind === 'play' ? `Play ${m.target} rounds of ${n}` : m.kind === 'score' ? `Score ${m.target.toLocaleString('en-US')} in ${n}` : `Beat your best in ${n}`; };
+
+  // a finished round from any game: XP, missions, streak
+  function report(game, r){
+    r = r || {}; const score = +r.score || 0, newBest = !!r.newBest;
+    S.runs[game] = (S.runs[game] || 0) + 1; S.played++; S.last = game;
+    if (score > (S.best[game] || 0)) S.best[game] = score;
+    const before = level().level; let gain = 20 + (newBest ? 25 : 0); const done = [];
+    for (const m of daily().list){ if (m.done || m.game !== game) continue;
+      if (m.kind === 'play') m.prog++; else if (m.kind === 'score') m.prog = Math.max(m.prog, score); else if (newBest) m.prog = 1;
+      if (m.prog >= m.target){ m.done = true; gain += 100; done.push(missionText(m)); } }
+    if (!S.daily.bonus && S.daily.list.every(m => m.done)){ S.daily.bonus = true; gain += 150; done.push('All three missions'); }
+    // a day with at least one finished round keeps the streak going
+    const d = today(); if (S.streak.last !== d){ S.streak.days = S.streak.last && dayNum(d) - dayNum(S.streak.last) === 1 ? S.streak.days + 1 : 1; S.streak.last = d; }
+    S.xp += gain; save();
+    const after = level().level;
+    return {gain, done, levelUp:after > before ? after : 0};
+  }
+  const streak = () => { const d = today(); return S.streak.last && dayNum(d) - dayNum(S.streak.last) <= 1 ? S.streak.days : 0; };
+  return {GAMES, CATS, byId, get state(){ return S; }, level, daily, missionText, report, streak, save, reload:load};
+})();
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#05071a">
+<title>Afterimage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* Deep space, a ringed planet, nebula haze. You are a comet; every loop leaves an afterimage that
+   orbits the same path again. UI pieces are glass panels floating over the void; the comet is the bright thing. */
+:root{--bg:#05071a;--glass:rgba(16,20,50,.72);--line:rgba(160,190,255,.18);--text:#e9edff;--text2:#9aa3c7;--cyan:#6ee7ff;--violet:#a78bfa;--gold:#ffd166;--coral:#ff7a8a;--mint:#5eead4;
+  --head:'Unbounded',system-ui,sans-serif;--ui:'Space Grotesk',system-ui,sans-serif;--st:var(--safe-top,env(safe-area-inset-top,0px));--sb:var(--safe-bottom,env(safe-area-inset-bottom,0px))}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--ui);user-select:none;-webkit-user-select:none;touch-action:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+button{font:inherit;color:inherit;border:0;cursor:pointer;background:none;padding:0}
+button:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+/* glass panels */
+.tag{background:var(--glass);border:1px solid var(--line);border-radius:14px;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:0 10px 30px rgba(0,0,12,.35)}
+.key{height:52px;min-width:52px;padding:0 18px;border-radius:14px;display:inline-grid;place-items:center;background:rgba(255,255,255,.06);border:1px solid var(--line);font-weight:600;font-size:16px;transition:transform .08s,background .15s}
+.key:active{transform:scale(.96);background:rgba(255,255,255,.12)}
+.key svg{width:22px;height:22px;fill:none;stroke:var(--text);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.key.primary{background:linear-gradient(135deg,var(--cyan),var(--violet));border:0;color:#0a0d24;font-family:var(--head);font-weight:700;font-size:18px;letter-spacing:.06em;padding:0 30px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2),0 8px 28px rgba(110,231,255,.28)}
+.key.small{height:42px;min-width:42px;padding:0;border-radius:12px}
+.key.small svg{width:19px;height:19px}
+#soundBtn.off svg .wave,#homeSound.off svg .wave{display:none}#soundBtn svg .x,#homeSound svg .x{display:none}#soundBtn.off svg .x,#homeSound.off svg .x{display:inline}
+
+/* HUD: one glass strip at the top, the loop timer glowing along its bottom edge */
+#hud{position:fixed;left:0;right:0;top:calc(var(--st) + 10px);display:flex;justify-content:center;z-index:2;pointer-events:none}
+.strip{position:relative;width:min(460px,calc(100vw - 24px));display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:8px 14px 13px 8px}
+.strip .key{pointer-events:auto}
+.strip .mid{display:grid;line-height:1.1}
+.strip .mid small{font-size:11px;font-weight:600;color:var(--text2);letter-spacing:.14em;text-transform:uppercase}
+.strip .mid b{font-family:var(--head);font-weight:700;font-size:26px;font-variant-numeric:tabular-nums}
+.strip .right{display:grid;justify-items:end;gap:5px}
+.strip .right small{font-size:11px;color:var(--text2);font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.strip .right small b{color:var(--text);font-family:var(--head);font-size:14px;margin-left:5px;letter-spacing:0}
+#lives{display:flex;gap:4px}
+#lives svg{width:16px;height:16px}
+#lives svg.gone{opacity:.2}
+#timer{position:absolute;left:12px;right:12px;bottom:5px;height:3px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden}
+#timer i{display:block;height:100%;width:100%;background:linear-gradient(90deg,var(--cyan),var(--violet));transform-origin:0 50%;transform:scaleX(0)}
+#timer.done i{background:var(--mint)}
+#timer.warn i{background:var(--coral)}
+/* what to do right now: a small pill near the thumb */
+#cue{position:fixed;left:50%;bottom:calc(var(--sb) + 18px);transform:translateX(-50%);z-index:2;padding:9px 18px;border-radius:999px;font-family:var(--head);font-weight:500;font-size:13px;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;pointer-events:none;transition:color .2s,border-color .2s,box-shadow .2s}
+#cue.you{color:var(--cyan);border-color:rgba(110,231,255,.5);box-shadow:0 0 22px rgba(110,231,255,.25)}
+#cue.warn{color:var(--coral);border-color:rgba(255,122,138,.6);box-shadow:0 0 22px rgba(255,122,138,.3)}
+.ft{position:fixed;left:0;top:0;z-index:3;font-family:var(--head);font-weight:600;font-size:12px;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;pointer-events:none;text-shadow:0 0 10px currentColor;animation:ft .95s ease forwards}
+@keyframes ft{0%{opacity:0;transform:translate(-50%,-50%) scale(.7)}15%{opacity:1;transform:translate(-50%,-90%) scale(1)}75%{opacity:1}100%{opacity:0;transform:translate(-50%,-180%)}}
+
+/* sheets */
+#overlay,#pause,#coach{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(3,4,14,.5);animation:fade .25s}
+@keyframes fade{from{opacity:0}}
+.card{width:min(460px,100%);background:rgba(14,18,46,.92);border:1px solid var(--line);border-radius:20px;padding:22px 20px 18px;display:grid;gap:16px;box-shadow:0 0 0 1px rgba(255,255,255,.03) inset,0 24px 60px rgba(0,0,10,.5);animation:rise .45s cubic-bezier(.2,1.2,.4,1)}
+@keyframes rise{from{transform:translateY(40px) scale(.96);opacity:0}}
+.card h2{margin:0;font-family:var(--head);font-weight:700;font-size:25px;line-height:1.15}
+.card .sub{margin:-8px 0 0;font-size:15px;color:var(--text2)}
+.card .sub.nb{color:var(--gold);font-weight:700}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--line);padding:12px 4px}
+.stats div{text-align:center}
+.stats div + div{border-left:1px dashed var(--line)}
+.stats small{display:block;font-size:11px;color:var(--text2);font-weight:600;letter-spacing:.12em;text-transform:uppercase}
+.stats b{font-family:var(--head);font-weight:700;font-size:22px}
+.row{display:flex;gap:10px}.row .key{flex:1}
+.coach{display:grid;gap:12px}
+.coach div{display:grid;grid-template-columns:44px 1fr;gap:12px;align-items:center}
+.coach i{width:44px;height:44px;border-radius:12px;background:rgba(110,231,255,.08);border:1px solid rgba(110,231,255,.2);display:grid;place-items:center}
+.coach i svg{width:22px;height:22px;fill:none;stroke:var(--cyan);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.coach b{display:block;font-weight:700;font-size:15px}
+.coach p{margin:1px 0 0;font-size:14px;color:var(--text2)}
+.banner{position:fixed;left:50%;top:30%;z-index:3;transform:translateX(-50%);padding:12px 24px;text-align:center;pointer-events:none;animation:bann 2.4s ease forwards}
+.banner small{display:block;font-size:11px;font-weight:600;color:var(--text2);letter-spacing:.16em;text-transform:uppercase}
+.banner b{font-family:var(--head);font-weight:700;font-size:22px;white-space:nowrap;text-shadow:0 0 18px rgba(110,231,255,.5)}
+@keyframes bann{0%{opacity:0;transform:translateX(-50%) scale(.85);filter:blur(6px)}14%{opacity:1;transform:translateX(-50%) scale(1);filter:none}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-10px)}}
+
+/* splash + wordmark: letters arrive out of a blur, each leaving its own coloured afterimage */
+#splash{position:fixed;inset:0;z-index:20;background:radial-gradient(ellipse at 50% 40%,#141c46,#05071a 70%);display:grid;place-items:center;transition:opacity .5s}
+#splash.out{opacity:0;pointer-events:none}
+.mark{display:grid;justify-items:center;gap:26px}
+.word{display:flex;justify-content:center}
+.word i{font-style:normal;display:inline-block;font-family:var(--head);font-weight:800;font-size:clamp(30px,9.4vw,64px);letter-spacing:.04em;color:#f4f6ff;
+  text-shadow:-.06em 0 0 rgba(255,90,170,.55),.06em 0 0 rgba(90,220,255,.55),0 0 .5em rgba(140,170,255,.45)}
+#splash .word i,#home .word i{animation:ghostin .8s cubic-bezier(.2,.9,.3,1) both;animation-delay:calc(var(--i) * 55ms)}
+@keyframes ghostin{from{opacity:0;filter:blur(10px);transform:translateX(-.6em) scale(1.15)}}
+.pbar{width:170px;height:4px;border-radius:2px;background:rgba(255,255,255,.12);overflow:hidden}
+.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));border-radius:2px;transition:width .3s}
+
+/* home */
+#home{position:fixed;inset:0;z-index:4;display:grid;grid-template-rows:auto auto 1fr auto;padding:calc(var(--st) + 10px) 0 calc(var(--sb) + 22px)}
+#homeTop{display:flex;justify-content:flex-end;gap:8px;padding:0 16px;min-height:44px}
+#homeTop .key{height:44px;min-width:44px;padding:0 12px}
+#home .word{margin-top:8px}
+#home .tagline{justify-self:center;margin-top:14px;padding:6px 16px;border-radius:999px;font-weight:500;font-size:14px;color:var(--text2)}
+#shelf{align-self:center;display:flex;gap:16px;overflow-x:auto;scroll-snap-type:x mandatory;padding:18px calc(50vw - 115px) 22px;scrollbar-width:none;touch-action:pan-x}
+#shelf::-webkit-scrollbar{display:none}
+.mcard{flex:0 0 230px;scroll-snap-align:center;border-radius:18px;padding:12px;background:rgba(16,20,50,.75);border:1px solid var(--line);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);text-align:left;display:grid;gap:8px;transition:transform .25s,opacity .25s,border-color .25s,box-shadow .25s;opacity:.55;transform:scale(.92)}
+.mcard.on{opacity:1;transform:none;border-color:rgba(110,231,255,.45);box-shadow:0 0 30px rgba(110,231,255,.15)}
+.mcard .art{height:110px;border-radius:12px;overflow:hidden}
+.mcard .art canvas{display:block;width:100%;height:100%}
+.mcard b{font-family:var(--head);font-weight:700;font-size:18px}
+.mcard p{margin:-4px 0 0;font-size:14px;color:var(--text2);line-height:1.35;min-height:38px}
+.mcard .meta{font-size:11px;color:var(--text2);font-weight:600;letter-spacing:.12em;text-transform:uppercase}
+.mcard .meta b{font-size:15px;color:var(--text);margin-left:5px;letter-spacing:0}
+#dots{display:flex;justify-content:center;gap:7px;margin-top:-6px}
+#dots i{width:7px;height:7px;border-radius:4px;background:rgba(255,255,255,.25);transition:width .2s,background .2s}
+#dots i.on{width:20px;background:var(--cyan)}
+#home .bottomset{width:min(420px,calc(100% - 32px));justify-self:center}
+#playBtn{height:62px;font-size:22px;width:100%}
+@media (max-height:700px){ #home .tagline{display:none} .mcard{flex-basis:190px}.mcard p{display:none}.mcard .art{height:84px} #shelf{padding:10px calc(50vw - 95px) 14px} #playBtn{height:54px;font-size:19px} }
+/* ===== tablets: iPad portrait and landscape, Split View / Stage Manager windows from 600x700 up. Phones never match these
+   queries (--z stays 1), so their layout is untouched. Each UI layer is laid out in a smaller virtual box (its real size / --z)
+   and scaled up by --z, so keys, cards and text grow together; the playfield canvas keeps full resolution and resize() frames it. */
+:root{--z:1}
+@media (min-width:600px) and (min-height:800px){:root{--z:1.15}}
+@media (min-width:740px) and (min-height:900px){:root{--z:1.25}}
+@media (min-width:800px) and (min-height:1100px){:root{--z:1.35}}
+@media (min-width:1000px) and (min-height:1300px){:root{--z:1.5}}
+@media (min-width:900px) and (min-height:700px) and (orientation:landscape){:root{--z:1.1}}
+@media (min-width:1200px) and (min-height:950px) and (orientation:landscape){:root{--z:1.3}}
+@media (min-width:600px) and (min-height:700px){
+  #home,#overlay,#pause,#coach,#iosSheet{right:auto;bottom:auto;width:calc(100% / var(--z));height:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #hud{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #overlay,#pause,#coach,#iosSheet{place-items:center}
+  .strip{width:min(460px,calc(100% - 24px))}
+  #shelf{padding-left:calc(50% - 115px);padding-right:calc(50% - 115px)}
+  #home .word i{font-size:clamp(30px,calc(9.4vw / var(--z)),64px)}
+  #splash .mark{transform:scale(var(--z))}#splash .word i{font-size:clamp(30px,calc(9.4vw / var(--z)),64px)}
+  #cue{transform:translateX(-50%) scale(var(--z));transform-origin:50% 100%}
+  .ft{font-size:calc(12px * var(--z))}
+  .banner{padding:calc(12px * var(--z)) calc(24px * var(--z))}.banner small{font-size:calc(11px * var(--z))}.banner b{font-size:calc(22px * var(--z))}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition-duration:.01s!important}}
+</style>
+</head>
+<body>
+<div id="splash" role="status" aria-label="Loading"><div class="mark">
+  <div class="word" aria-label="Afterimage"></div>
+  <span class="pbar"><i id="splashBar"></i></span>
+</div></div>
+<div id="stage"></div>
+<div id="home" hidden>
+  <div id="homeTop">
+    <button class="key" id="homeHelp" aria-label="How to play"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.6v.4"/><path d="M12 17h.01"/></svg></button>
+    <button class="key" id="homeSound" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+  </div>
+  <div style="display:grid;justify-items:center"><div class="word" aria-label="Afterimage"></div><span class="tag tagline">Your past is right behind you</span></div>
+  <div style="display:grid;align-content:center"><div id="shelf"></div><div id="dots"></div></div>
+  <div class="bottomset"><button class="key primary" id="playBtn">PLAY</button></div>
+</div>
+<div id="hud" hidden><div class="strip tag">
+  <button class="key small" id="pauseBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg></button>
+  <span class="mid"><small id="modeName">Classic</small><b id="score">0</b></span>
+  <span class="right"><span id="lives"></span><small>Best<b id="best">0</b></small></span>
+  <span id="timer"><i id="timerFill"></i></span>
+</div></div>
+<div id="cue" class="tag" hidden>Grab the star</div>
+<div id="pause" hidden><div class="card">
+  <h2>Paused</h2>
+  <div class="stats" id="pStats"></div>
+  <div class="row"><button class="key" id="pRestart">Restart</button><button class="key primary" id="pResume">RESUME</button></div>
+  <div class="row"><button class="key" id="pHome">Main menu</button><button class="key" id="pHelp">How to play</button>
+    <button class="key" id="soundBtn" aria-label="Sound" style="flex:0 0 52px"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button></div>
+</div></div>
+<div id="coach" hidden><div class="card">
+  <h2>How to play</h2>
+  <div class="coach">
+    <div><i><svg viewBox="0 0 24 24"><path d="M12 2v6M12 16v6M2 12h6M16 12h6"/><path d="m12 8 1.5 2.5L16 12l-2.5 1.5L12 16l-1.5-2.5L8 12l2.5-1.5z"/></svg></i><span><b>Grab the star</b><p>Drag anywhere and reach the star before the loop runs out. A loop lasts a few seconds.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><circle cx="17" cy="7" r="3"/><circle cx="10" cy="13" r="2.2" opacity=".6"/><circle cx="5" cy="18" r="1.5" opacity=".35"/></svg></i><span><b>Dodge your afterimages</b><p>Every loop is recorded and flies again as an afterimage of you. The dotted orbit shows where it is headed.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(-20 12 12)"/></svg></i><span><b>Feed the black hole</b><p>A black hole swallows your oldest afterimage. Hitting an afterimage costs a life.</p></span></div>
+  </div>
+  <button class="key primary" id="coachOk">GOT IT</button>
+</div></div>
+<div id="overlay" hidden><div class="card">
+  <h2 id="ovTitle">Your past caught up</h2>
+  <p class="sub" id="ovSub"></p>
+  <div class="stats" id="ovStats"></div>
+  <div class="row"><button class="key primary" id="ovNew">PLAY AGAIN</button></div>
+  <div class="row" id="ovRow2"><button class="key" id="ovModes">Main menu</button></div>
+</div></div>
+
+<script>window.PLATFORM = {name:'web'};
+</script>
+<script>
+(() => {
+'use strict';
+const SAVE = 'afterimage-v1';
+const MODES = {
+  classic:{name:'Classic',  desc:'Five-second loops. Three lives.', lives:3, loop:300, holeEvery:4},
+  rush:   {name:'Rush',     desc:'Loops last 3.5 seconds. No time to think.', lives:3, loop:210, holeEvery:4},
+  one:    {name:'One Life', desc:'One touch and it is over.', lives:1, loop:300, holeEvery:5},
+  zen:    {name:'Zen',      desc:'No lives, no hurry. Five afterimages at most.', lives:Infinity, loop:360, holeEvery:0, zen:true, maxEchoes:5},
+};
+const MODE_IDS = Object.keys(MODES);
+let mode = 'classic', M = MODES.classic;
+const PLATFORM = window.PLATFORM || {name:'web'};
+const $ = id => document.getElementById(id);
+const UIZ = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--z')) || 1;   // tablet UI scale (1 on phones)
+const CYAN = '#6ee7ff', GOLD = '#ffd166', VIOLET = '#a78bfa';
+// afterimages glow in these, in order; cyan (you) and gold (the star) stay unique
+const ECHO_COLS = ['#ff7a8a', '#a78bfa', '#5eead4', '#60a5fa', '#f472b6', '#a3e635'];
+document.querySelectorAll('.word').forEach(w => w.innerHTML = [...'AFTERIMAGE'].map((c, i) => `<i style="--i:${i}">${c}</i>`).join(''));
+
+// ================= world: the short side of the screen is 100 units =================
+const STEP = 1 / 60, GRACE = 24, PLAYER_R = 2.4, ECHO_R = 2.4, STAR_R = 3.1, HOLE_R = 3.2, NEAR = 3.2;
+const MOUSE_SPEED = 95, KEY_SPEED = 62, TOUCH_SENS = 1.25;
+const host = $('stage'), cvs = document.createElement('canvas'), ctx = cvs.getContext('2d');
+host.appendChild(cvs);
+const MOBILE = matchMedia('(pointer:coarse)').matches;
+let W = 0, H = 0, DPR = 1, U = 1, AW = 100, AH = 100;
+const B = {x0:0, x1:100, y0:0, y1:100, sy0:0, sy1:100};   // where you may fly, and where stars may appear
+const probe = h => { const d = document.createElement('div'); d.style.cssText = `position:fixed;left:0;top:0;width:0;visibility:hidden;pointer-events:none;height:${h}`; document.body.appendChild(d); return d; };
+const safeTop = probe('var(--st)'), safeBot = probe('var(--sb)');
+function resize(){
+  DPR = Math.min(devicePixelRatio || 1, MOBILE ? 2.5 : 2); W = innerWidth; H = innerHeight;
+  cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
+  U = Math.min(W, H) / 100; AW = W / U; AH = H / U;
+  const ST = safeTop.offsetHeight, SB = safeBot.offsetHeight;
+  B.x0 = PLAYER_R + 1; B.x1 = AW - PLAYER_R - 1;
+  const z = UIZ();   // the HUD strip and the cue pill grow with the tablet UI scale
+  B.y0 = (ST + 84 * z) / U + PLAYER_R; B.y1 = AH - (SB + 8) / U - PLAYER_R;
+  B.sy0 = B.y0 + 4; B.sy1 = AH - (SB + 74 * z) / U - STAR_R;
+  makeSprites(); paintBg(bgA, TIMES[timeIdx]); bgFade = 0;
+  if (G){ G.px = clampX(G.px); G.py = clampY(G.py); G.tail.length = 0; }
+}
+const clampX = x => Math.max(B.x0, Math.min(B.x1, x));
+const clampY = y => Math.max(B.y0, Math.min(B.y1, y));
+addEventListener('resize', resize);
+
+// ================= light =================
+const hex = n => '#' + n.toString(16).padStart(6, '0');
+const rng = k => () => (k = (k * 9301 + 49297) % 233280) / 233280;
+const rgb = c => { const n = parseInt(c.slice(1), 16); return [n >> 16, n >> 8 & 255, n & 255]; };
+const rgba = (c, a) => `rgba(${rgb(c).join(',')},${a})`;
+const mix = (c, k, to = 255) => `rgb(${rgb(c).map(v => Math.round(v + (to - v) * k)).join(',')})`;
+// a glowing body, drawn once into its own canvas and stamped every frame
+function sprite(r, draw){
+  const half = Math.ceil(r * U), size = Math.ceil(half * 2 * DPR);
+  const c = document.createElement('canvas'); c.width = c.height = size; const x = c.getContext('2d');
+  x.setTransform(DPR, 0, 0, DPR, size / 2, size / 2); draw(x, U); return {c, h:size / DPR / 2};
+}
+function radial(x, r, stops){ const g = x.createRadialGradient(0, 0, 0, 0, 0, r); stops.forEach(([o, c]) => g.addColorStop(o, c)); x.fillStyle = g; x.fillRect(-r, -r, r * 2, r * 2); }
+function orb(x, r, col){   // a small lit planet: rim light from the upper left, dark limb on the far side
+  const g = x.createRadialGradient(-r * .35, -r * .4, r * .1, 0, 0, r);
+  g.addColorStop(0, mix(col, .7)); g.addColorStop(.45, col); g.addColorStop(1, mix(col, .55, 0));
+  x.beginPath(); x.arc(0, 0, r, 0, Math.PI * 2); x.fillStyle = g; x.fill();
+}
+function glint(x, r, thin){ x.beginPath(); for (let i = 0; i < 8; i++){ const a = -Math.PI / 2 + i * Math.PI / 4, rr = i % 2 ? r * thin : r; x.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); } x.closePath(); }
+const SPR = {};
+function makeSprites(){
+  SPR.you = sprite(PLAYER_R * 4, (x, u) => { radial(x, PLAYER_R * 4 * u, [[0, 'rgba(110,231,255,.55)'], [.25, 'rgba(110,231,255,.18)'], [1, 'rgba(110,231,255,0)']]);
+    radial(x, PLAYER_R * u, [[0, '#ffffff'], [.55, '#e6fbff'], [.8, CYAN], [1, 'rgba(110,231,255,0)']]); });
+  SPR.echo = ECHO_COLS.map(c => sprite(ECHO_R * 2.6, (x, u) => { radial(x, ECHO_R * 2.6 * u, [[0, rgba(c, .35)], [.4, rgba(c, .1)], [1, rgba(c, 0)]]); orb(x, ECHO_R * u, c); }));
+  SPR.star = sprite(STAR_R * 2, (x, u) => { glint(x, STAR_R * 1.9 * u, .12); x.fillStyle = 'rgba(255,209,102,.5)'; x.fill();
+    glint(x, STAR_R * 1.15 * u, .28); x.fillStyle = GOLD; x.fill(); radial(x, STAR_R * .5 * u, [[0, '#fffbe8'], [1, 'rgba(255,240,200,0)']]); });
+}
+function blit(s, x, y, scale = 1, rot = 0, alpha = 1, add = false){
+  ctx.save(); ctx.globalAlpha = alpha; if (add) ctx.globalCompositeOperation = 'lighter'; ctx.translate(x * U, y * U); if (rot) ctx.rotate(rot);
+  ctx.drawImage(s.c, -s.h * scale, -s.h * scale, s.h * 2 * scale, s.h * 2 * scale); ctx.restore();
+}
+
+// ================= the sky drifts as you collect stars =================
+const TIMES = [
+  {name:'Low Orbit',  edge:0x05071a, mid:0x141c46, neb:['#3b2a7a', '#1f4f8a', '#5a2a6a'], planet:['#9fb6ff', '#2a3488'], ring:'#c9d4ff'},
+  {name:'Dark Side',  edge:0x020310, mid:0x0b0f2c, neb:['#2a1f5a', '#14385a', '#3a1f4a'], planet:['#c8c2b5', '#3a3644'], ring:'#a8a3b8'},
+  {name:'Nebula',     edge:0x08041a, mid:0x22104a, neb:['#7a2a8a', '#2a4aa8', '#a83a6a'], planet:['#ffb38a', '#7a2a4a'], ring:'#ffd0b8'},
+  {name:'Supernova',  edge:0x110408, mid:0x350e1c, neb:['#c8502a', '#8a2a6a', '#d8902a'], planet:['#ffd58a', '#9a4422'], ring:'#ffe2a8'},
+  {name:'Deep Field', edge:0x01030a, mid:0x0a1a2a, neb:['#1a6a7a', '#2a3a8a', '#3a7a5a'], planet:['#a8ffe0', '#1e5e66'], ring:'#c8fff0'},
+];
+let timeIdx = 0, bgFade = 0, bgA = document.createElement('canvas'), bgB = document.createElement('canvas');
+const timeFor = n => Math.min(TIMES.length - 1, Math.floor(n / 5));
+// the backdrop is painted once per sky: void, nebula haze, a star field, and a ringed planet in the corner
+function paintBg(c, t){
+  c.width = cvs.width; c.height = cvs.height; const x = c.getContext('2d'); x.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const m = Math.max(W, H), R = rng(23);
+  const base = x.createRadialGradient(W * .5, H * .38, 0, W * .5, H * .38, m * .8); base.addColorStop(0, hex(t.mid)); base.addColorStop(1, hex(t.edge)); x.fillStyle = base; x.fillRect(0, 0, W, H);
+  x.save(); x.globalCompositeOperation = 'lighter';
+  t.neb.forEach((col, i) => { for (let k = 0; k < 2; k++){ const nx = W * (.1 + R() * .8), ny = H * (.1 + R() * .8), nr = m * (.25 + R() * .3);
+    const g = x.createRadialGradient(nx, ny, 0, nx, ny, nr); g.addColorStop(0, rgba(col, .32)); g.addColorStop(.5, rgba(col, .1)); g.addColorStop(1, rgba(col, 0)); x.fillStyle = g; x.fillRect(nx - nr, ny - nr, nr * 2, nr * 2); } });
+  for (let i = 0; i < Math.round(W * H / 2600); i++){ const s = R() < .9 ? .4 + R() * .7 : 1 + R() * .8; x.globalAlpha = .25 + R() * .7; x.fillStyle = R() < .2 ? '#cfe0ff' : R() < .1 ? '#ffe2c4' : '#ffffff'; x.beginPath(); x.arc(R() * W, R() * H, s, 0, Math.PI * 2); x.fill(); }
+  x.globalAlpha = 1;
+  for (let i = 0; i < 9; i++){ const sx = R() * W, sy = R() * H, l = 4 + R() * 7; x.strokeStyle = 'rgba(220,235,255,.55)'; x.lineWidth = .8; x.beginPath(); x.moveTo(sx - l, sy); x.lineTo(sx + l, sy); x.moveTo(sx, sy - l); x.lineTo(sx, sy + l); x.stroke();
+    const g = x.createRadialGradient(sx, sy, 0, sx, sy, l * .8); g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(sx - l, sy - l, l * 2, l * 2); }
+  x.restore();
+  // a ringed planet, partly off the top-right corner, with faint orbit lines around it
+  const px = W * .86, py = H * .1, pr = 14 * U;
+  x.strokeStyle = rgba(t.ring, .07); x.lineWidth = 1; for (let i = 1; i <= 3; i++){ x.beginPath(); x.ellipse(px, py, pr * (2 + i * 1.3), pr * (1.1 + i * .7), -.35, 0, Math.PI * 2); x.stroke(); }
+  const halo = x.createRadialGradient(px, py, pr * .8, px, py, pr * 2.4); halo.addColorStop(0, rgba(t.planet[0], .25)); halo.addColorStop(1, rgba(t.planet[0], 0)); x.fillStyle = halo; x.fillRect(px - pr * 2.4, py - pr * 2.4, pr * 4.8, pr * 4.8);
+  const ring = (from, to) => { x.save(); x.translate(px, py); x.rotate(-.35); x.strokeStyle = rgba(t.ring, .55); x.lineWidth = pr * .1; x.beginPath(); x.ellipse(0, 0, pr * 1.8, pr * .45, 0, from, to); x.stroke();
+    x.strokeStyle = rgba(t.ring, .25); x.lineWidth = pr * .05; x.beginPath(); x.ellipse(0, 0, pr * 2.05, pr * .52, 0, from, to); x.stroke(); x.restore(); };
+  ring(Math.PI, Math.PI * 2);
+  const pg = x.createRadialGradient(px - pr * .4, py - pr * .45, pr * .1, px, py, pr); pg.addColorStop(0, mix(t.planet[0], .35)); pg.addColorStop(.5, t.planet[0]); pg.addColorStop(1, t.planet[1]);
+  x.fillStyle = pg; x.beginPath(); x.arc(px, py, pr, 0, Math.PI * 2); x.fill();
+  ring(0, Math.PI);
+  const v = x.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .35, W / 2, H / 2, Math.hypot(W, H) * .6);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,8,.45)'); x.fillStyle = v; x.fillRect(0, 0, W, H);
+  document.body.style.background = hex(t.edge);
+}
+function setTime(i){
+  if (i === timeIdx) return; timeIdx = i;
+  [bgA, bgB] = [bgB, bgA]; paintBg(bgA, TIMES[i]); bgFade = 1;
+}
+
+// ================= sparks and shockwaves =================
+const sparks = [], waves = [];
+function burst(x, y, n, cols, speed = 30, life = .9, pull = null){
+  for (let i = 0; i < n && sparks.length < 600; i++){ const a = Math.random() * Math.PI * 2, v = speed * (.25 + Math.random());
+    sparks.push({x, y, vx:Math.cos(a) * v, vy:Math.sin(a) * v, r:.3 + Math.random() * .5, col:cols[i % cols.length], life:life * (.6 + Math.random() * .4), max:life, pull}); }
+}
+const wave = (x, y, col, max = 14, life = .6) => waves.push({x, y, col, max, life, t:0});
+function shatter(e, pull){   // an afterimage breaks apart: its body bursts, and its orbit scatters into dust
+  const f = G ? Math.min(G.frame, M.loop - 1) : 0, col = ECHO_COLS[e.col], ex = e.rec[f * 2], ey = e.rec[f * 2 + 1];
+  burst(ex, ey, 30, [col, mix(col, .6)], pull ? 10 : 34, pull ? 1.4 : .9, pull);
+  for (let k = 0; k < M.loop; k += 18) burst(e.rec[k * 2], e.rec[k * 2 + 1], 2, [col], 6, pull ? 1.4 : .7, pull);
+  if (!pull) wave(ex, ey, col);
+}
+
+// ================= state =================
+let G = null, lives = 3, over = false, paused = false, adOpen = false, continued = false, startBest = 0, now = 0, shake = 0, sound = true;
+let store = {sound:true, mode:'classic', best:{}, seen:false, echoHint:false};
+try { const s = JSON.parse(localStorage.getItem(SAVE) || 'null'); if (s && s.best) store = Object.assign(store, s); } catch(e){}
+sound = store.sound !== false;
+const persist = () => { try { store.sound = sound; store.mode = mode; localStorage.setItem(SAVE, JSON.stringify(store)); } catch(e){} };
+const bestOf = id => store.best[id] || 0;
+const playing = () => !!G && !over && !paused && !adOpen && $('home').hidden && $('overlay').hidden && $('pause').hidden && $('coach').hidden && document.visibilityState === 'visible';
+const buzz = ms => { if (PLATFORM.haptic) return PLATFORM.haptic(ms); try { navigator.vibrate && navigator.vibrate(ms); } catch(e){} };
+
+function newGame(){
+  over = false; paused = false; continued = false; lives = M.lives; startBest = bestOf(mode);
+  G = {px:(B.x0 + B.x1) / 2, py:(B.y0 + B.y1) * .55, frame:0, loopN:0, score:0, near:0, echoes:[], colI:0, rec:new Float32Array(M.loop * 2), star:null, hole:null, inv:0, timeout:false, tail:[]};
+  inp.dx = inp.dy = 0; inp.mouse = null;
+  setTime(0); spawnStar(); paintHud(); setCue('Grab the star', 'you');
+  $('overlay').hidden = $('pause').hidden = true;
+}
+// a spot away from you and as far as it can get from the afterimages' orbits
+function pickSpot(minD, maxD){
+  let best = null, bs = -1;
+  for (let i = 0; i < 40; i++){
+    const x = 6 + Math.random() * (AW - 12), y = B.sy0 + Math.random() * Math.max(1, B.sy1 - B.sy0), dp = Math.hypot(x - G.px, y - G.py);
+    if (dp < minD || dp > maxD) continue;
+    let m = 99; for (const e of G.echoes) for (let f = 0; f < M.loop; f += 6){ const d = Math.hypot(x - e.rec[f * 2], y - e.rec[f * 2 + 1]); if (d < m) m = d; }
+    const s = Math.min(m, 14) + Math.random() * 3; if (s > bs){ bs = s; best = {x, y}; }
+  }
+  return best || {x:clampX(AW - G.px), y:Math.max(B.sy0, Math.min(B.sy1, AH - G.py))};
+}
+function spawnStar(){
+  const p = pickSpot(22, 80); G.star = {x:p.x, y:p.y, taken:false, t:0}; G.hole = null;
+  if (M.holeEvery && G.loopN > 0 && G.loopN % M.holeEvery === 0 && G.echoes.length >= 3){ const h = pickSpot(15, 90); G.hole = {x:h.x, y:h.y, t:0}; ft(h.x, h.y - 6, 'black hole', VIOLET); }
+}
+function nextLoop(){
+  if (G.star.taken){
+    G.echoes.push({rec:G.rec, col:G.colI++ % ECHO_COLS.length, near:false});
+    if (M.maxEchoes && G.echoes.length > M.maxEchoes) shatter(G.echoes.shift());
+    if (!store.echoHint){ store.echoHint = true; persist(); banner('This is your afterimage', 'Don’t touch it'); }
+  } else {
+    // the star slipped away: this loop is not kept, and it costs a life
+    Sfx.wrong(); shake = 6; buzz(40); ft(G.px, G.py - 6, 'time’s up', '#ff7a8a');
+    if (!M.zen){ lives--; paintHud(); if (lives <= 0){ G.timeout = true; endGame(); return; } }
+  }
+  G.rec = new Float32Array(M.loop * 2); G.frame = 0; G.loopN++;
+  for (const e of G.echoes) e.near = false;
+  spawnStar(); setCue('Grab the star', 'you'); Sfx.loop();
+}
+function hitEcho(i){
+  const e = G.echoes.splice(i, 1)[0]; shatter(e);
+  Sfx.wrong(); shake = 10; buzz([30, 20, 50]);
+  if (M.zen){ ft(G.px, G.py - 6, 'shattered', ECHO_COLS[e.col]); return; }
+  lives--; paintHud();
+  if (lives <= 0){ endGame(); return; }
+  G.inv = 75; ft(G.px, G.py - 6, 'life lost', '#ff7a8a');
+}
+function update(){
+  if (!playing()){ inp.dx = inp.dy = 0; return; }
+  const k = inp.keys, kx = (k.arrowright || k.d ? 1 : 0) - (k.arrowleft || k.a ? 1 : 0), ky = (k.arrowdown || k.s ? 1 : 0) - (k.arrowup || k.w ? 1 : 0);
+  if (kx || ky){ const l = Math.hypot(kx, ky); G.px += kx / l * KEY_SPEED * STEP; G.py += ky / l * KEY_SPEED * STEP; inp.mouse = null; }
+  else if (inp.mouse){ const dx = inp.mouse.x - G.px, dy = inp.mouse.y - G.py, d = Math.hypot(dx, dy), m = MOUSE_SPEED * STEP;
+    if (d > m){ G.px += dx / d * m; G.py += dy / d * m; } else { G.px = inp.mouse.x; G.py = inp.mouse.y; } }
+  G.px = clampX(G.px + inp.dx); G.py = clampY(G.py + inp.dy); inp.dx = inp.dy = 0;
+  G.rec[G.frame * 2] = G.px; G.rec[G.frame * 2 + 1] = G.py;
+  G.tail.push(G.px, G.py); if (G.tail.length > 36) G.tail.splice(0, 2);
+  if (G.inv > 0) G.inv--;
+  // afterimages: harmless while they materialise at the start of a loop
+  if (G.frame >= GRACE && G.inv <= 0){
+    for (let i = 0; i < G.echoes.length; i++){ const e = G.echoes[i], d = Math.hypot(e.rec[G.frame * 2] - G.px, e.rec[G.frame * 2 + 1] - G.py) - PLAYER_R - ECHO_R;
+      if (d < -1){ hitEcho(i); if (over) return; break; }
+      if (d < NEAR && !e.near){ e.near = true; G.near++; ft(G.px, G.py - 6, 'close call', ECHO_COLS[e.col]); Sfx.near(); buzz(8); } }
+  }
+  const s = G.star; s.t++;
+  if (!s.taken && Math.hypot(s.x - G.px, s.y - G.py) < PLAYER_R + STAR_R){
+    s.taken = true; G.score++; paintHud(); Sfx.star(G.score); buzz(15);
+    if (G.score > bestOf(mode)){ store.best[mode] = G.score; persist(); }   // Zen never ends, so the best is kept as it grows
+    burst(s.x, s.y, 26, [GOLD, '#fff3cf', CYAN], 32); wave(s.x, s.y, GOLD, 12); setCue('Stay alive', '');
+    const t = timeFor(G.score); if (t !== timeIdx){ setTime(t); banner('Drifting into', TIMES[t].name); }
+    if (G.score % 10 === 0){ if (PLATFORM.onMilestone) setTimeout(() => PLATFORM.onMilestone(G.score), 900); if (M.zen && PLATFORM.onHappy) setTimeout(() => PLATFORM.onHappy(G.score), 900); }
+  }
+  if (G.hole){ G.hole.t++;
+    if (Math.hypot(G.hole.x - G.px, G.hole.y - G.py) < PLAYER_R + HOLE_R){
+      const old = G.echoes.shift(), h = G.hole; if (old) shatter(old, {x:h.x, y:h.y});
+      wave(h.x, h.y, VIOLET, 20, .8); ft(h.x, h.y - 6, 'swallowed', VIOLET);
+      G.hole = null; Sfx.hole(); buzz(25);
+    } }
+  if (!s.taken && G.frame === M.loop - 90) setCue('Hurry', 'warn');
+  if (!s.taken && G.frame > M.loop - 90 && G.frame % 20 === 0) Sfx.tick();
+  if (++G.frame >= M.loop) nextLoop();
+}
+function endGame(){
+  over = true; Sfx.lose(); buzz([40, 30, 80]); shake = 14;
+  burst(G.px, G.py, 50, ['#ffffff', CYAN, VIOLET], 44, 1.2); wave(G.px, G.py, CYAN, 26, .9);
+  const score = G.score, newBest = score > startBest && score > 0;
+  if (score > bestOf(mode)) store.best[mode] = score; persist();
+  setTimeout(() => {
+    $('ovTitle').textContent = G.timeout ? 'The star slipped away' : 'Your past caught up';
+    $('ovSub').textContent = newBest ? 'New best' : `You collected ${score} star${score === 1 ? '' : 's'}`; $('ovSub').className = 'sub' + (newBest ? ' nb' : '');
+    $('ovStats').innerHTML = stats([['Stars', score], ['Best', bestOf(mode)], ['Close calls', G.near]]);
+    $('overlay').hidden = false;
+    if (PLATFORM.onGameOver) PLATFORM.onGameOver({score, best:bestOf(mode), mode, newBest, continued});
+  }, 1000);
+}
+
+// ================= HUD =================
+const LIFE = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="rgba(110,231,255,.18)"/><circle cx="12" cy="12" r="6" fill="#6ee7ff"/><circle cx="10" cy="10" r="2" fill="#fff"/></svg>';
+const stats = rows => rows.map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join('');
+function paintHud(){
+  $('modeName').textContent = M.name; $('score').textContent = G ? G.score : 0; $('best').textContent = Math.max(bestOf(mode), G ? G.score : 0);
+  $('lives').innerHTML = M.lives === Infinity ? '' : Array.from({length:M.lives}, (_, i) => LIFE.replace('<svg', `<svg class="${i < lives ? '' : 'gone'}"`)).join('');
+}
+let cueText = 'Grab the star', cueCls = '';
+function setCue(text, cls){ if (text === cueText && cls === cueCls) return; cueText = text; cueCls = cls; const c = $('cue'); c.textContent = text; c.className = 'tag' + (cls ? ' ' + cls : ''); }
+function banner(small, big){ const el = document.createElement('div'); el.className = 'banner tag'; el.innerHTML = `<small>${small}</small><b>${big}</b>`; document.body.appendChild(el); setTimeout(() => el.remove(), 2400); }
+function ft(x, y, text, col = '#e9edff'){ const el = document.createElement('div'); el.className = 'ft'; el.textContent = text; el.style.color = col; el.style.left = x * U + 'px'; el.style.top = y * U + 'px'; document.body.appendChild(el); setTimeout(() => el.remove(), 950); }
+function pauseGame(){ if (!G || over || paused || !$('home').hidden) return; paused = true; $('pStats').innerHTML = stats([['Stars', G.score], ['Best', bestOf(mode)], ['Afterimages', G.echoes.length]]); $('pause').hidden = false; }
+function resumeGame(){ paused = false; $('pause').hidden = true; Sfx.unlock(); }
+$('pauseBtn').onclick = () => { Sfx.unlock(); pauseGame(); };
+$('pResume').onclick = resumeGame;
+$('pRestart').onclick = () => { Sfx.unlock(); newGame(); };
+$('pHome').onclick = () => { $('pause').hidden = true; paused = false; showHome(); };
+$('pHelp').onclick = () => { $('pause').hidden = true; $('coach').hidden = false; };
+$('homeHelp').onclick = () => { Sfx.unlock(); $('coach').hidden = false; };
+$('coachOk').onclick = () => { $('coach').hidden = true; store.seen = true; paused = false; persist(); Sfx.unlock(); };
+$('ovNew').onclick = () => { Sfx.unlock(); newGame(); };
+$('ovModes').onclick = () => showHome();
+const paintSound = () => { $('soundBtn').classList.toggle('off', !sound); $('homeSound').classList.toggle('off', !sound); };
+$('soundBtn').onclick = $('homeSound').onclick = () => { sound = !sound; paintSound(); persist(); Sfx.unlock(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') pauseGame(); });
+window.NEON = {   // same wrapper API as the other games
+  continueGame(){ if (!G) return; over = false; continued = true; lives = 1; G.timeout = false; $('overlay').hidden = true;
+    for (let i = 0; i < 2 && G.echoes.length; i++) shatter(G.echoes.shift());
+    G.inv = 90; G.star.taken = true; nextLoop(); paintHud(); Sfx.hole(); },
+  toast(msg){ banner('', msg); },
+  get mode(){ return mode; }, get over(){ return over; },
+  set adOpen(v){ adOpen = !!v; },
+};
+if (/debug/.test(location.search)) window.PT = {get G(){ return G; }, get B(){ return B; }, get U(){ return U; }, playing};
+
+// ================= home =================
+const MINI = {classic:{t:0, n:3, seed:2}, rush:{t:3, n:5, seed:5}, one:{t:1, n:1, seed:9}, zen:{t:4, n:2, seed:4}};
+function miniArt(cv, id){
+  const dpr = Math.min(3, devicePixelRatio || 1) * UIZ(), w = cv.clientWidth || 200, h = cv.clientHeight || 110; cv.width = w * dpr; cv.height = h * dpr;
+  const x = cv.getContext('2d'); x.scale(dpr, dpr); const cfg = MINI[id], t = TIMES[cfg.t], R = rng(cfg.seed * 131 + 7);
+  const g0 = x.createRadialGradient(w * .5, h * .4, 0, w * .5, h * .4, w * .8); g0.addColorStop(0, hex(t.mid)); g0.addColorStop(1, hex(t.edge)); x.fillStyle = g0; x.fillRect(0, 0, w, h);
+  x.globalCompositeOperation = 'lighter';
+  t.neb.forEach(col => { const nx = R() * w, ny = R() * h, nr = w * (.3 + R() * .3), g = x.createRadialGradient(nx, ny, 0, nx, ny, nr); g.addColorStop(0, rgba(col, .35)); g.addColorStop(1, rgba(col, 0)); x.fillStyle = g; x.fillRect(0, 0, w, h); });
+  for (let i = 0; i < 50; i++){ x.globalAlpha = .3 + R() * .6; x.fillStyle = '#fff'; x.fillRect(R() * w, R() * h, 1, 1); }
+  x.globalAlpha = 1;
+  for (let i = 0; i < cfg.n; i++){
+    const col = id === 'one' ? '#ff7a8a' : ECHO_COLS[i % ECHO_COLS.length], rx = w * (.18 + R() * .22), ry = h * (.15 + R() * .2), a = R() * Math.PI, ph = R() * 6;
+    x.setLineDash([1.5, 3.5]); x.strokeStyle = rgba(col, .8); x.lineWidth = 1.2; x.beginPath(); x.ellipse(w / 2, h / 2, rx, ry, a, 0, Math.PI * 2); x.stroke(); x.setLineDash([]);
+    const ox = w / 2 + Math.cos(ph) * rx * Math.cos(a) - Math.sin(ph) * ry * Math.sin(a), oy = h / 2 + Math.cos(ph) * rx * Math.sin(a) + Math.sin(ph) * ry * Math.cos(a);
+    const g = x.createRadialGradient(ox, oy, 0, ox, oy, 14); g.addColorStop(0, rgba(col, .6)); g.addColorStop(1, rgba(col, 0)); x.fillStyle = g; x.fillRect(ox - 14, oy - 14, 28, 28);
+    x.fillStyle = col; x.beginPath(); x.arc(ox, oy, 4.5, 0, Math.PI * 2); x.fill();
+  }
+  const sx = w * .5, sy = h * .5, g = x.createRadialGradient(sx, sy, 0, sx, sy, 22); g.addColorStop(0, 'rgba(110,231,255,.8)'); g.addColorStop(1, 'rgba(110,231,255,0)'); x.fillStyle = g; x.fillRect(sx - 22, sy - 22, 44, 44);
+  x.globalCompositeOperation = 'source-over'; x.fillStyle = '#fff'; x.beginPath(); x.arc(sx, sy, 3.5, 0, Math.PI * 2); x.fill();
+}
+let shelfMode = 'classic';
+function buildShelf(){
+  $('shelf').innerHTML = MODE_IDS.map(id => `<button class="mcard" data-mode="${id}"><span class="art"><canvas></canvas></span><b>${MODES[id].name}</b><p>${MODES[id].desc}</p><span class="meta">Best<b>${bestOf(id)}</b></span></button>`).join('');
+  $('dots').innerHTML = MODE_IDS.map(() => '<i></i>').join('');
+  requestAnimationFrame(() => [...$('shelf').children].forEach(c => miniArt(c.querySelector('canvas'), c.dataset.mode)));
+}
+function focusShelf(id, smooth){ shelfMode = id; const card = $('shelf').children[MODE_IDS.indexOf(id)]; if (card) $('shelf').scrollTo({left:card.offsetLeft - ($('shelf').clientWidth - card.offsetWidth) / 2, behavior:smooth ? 'smooth' : 'auto'}); paintShelf(); }
+function paintShelf(){ [...$('shelf').children].forEach(c => c.classList.toggle('on', c.dataset.mode === shelfMode)); [...$('dots').children].forEach((d, i) => d.classList.toggle('on', MODE_IDS[i] === shelfMode)); }
+let shelfT = 0;
+$('shelf').addEventListener('scroll', () => { const sh = $('shelf'), mid = sh.scrollLeft + sh.clientWidth / 2; let bid = shelfMode, bd = 1e9;
+  for (const c of sh.children){ const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd){ bd = d; bid = c.dataset.mode; } }
+  if (bid !== shelfMode){ shelfMode = bid; paintShelf(); clearTimeout(shelfT); shelfT = setTimeout(() => Sfx.tick(), 60); } }, {passive:true});
+$('shelf').addEventListener('click', e => { const c = e.target.closest('[data-mode]'); if (!c) return; Sfx.unlock(); if (c.dataset.mode === shelfMode) startPlay(); else focusShelf(c.dataset.mode, true); });
+function showHome(){
+  persist(); buildShelf(); paintSound(); requestAnimationFrame(() => focusShelf(mode, false));
+  $('overlay').hidden = $('pause').hidden = $('coach').hidden = true; $('home').hidden = false; $('hud').hidden = $('cue').hidden = true;
+  G = null; over = false; setTime(0);
+}
+function startPlay(){
+  Sfx.unlock(); mode = shelfMode; M = MODES[mode];
+  $('home').hidden = true; $('hud').hidden = $('cue').hidden = false; newGame(); persist(); Sfx.start();
+  if (!store.seen) $('coach').hidden = false;
+}
+$('playBtn').onclick = startPlay;
+
+// ================= input: drag anywhere (touch moves you relative to your thumb), or follow the mouse =================
+const inp = {dx:0, dy:0, id:null, lx:0, ly:0, mouse:null, keys:{}};
+host.addEventListener('pointerdown', e => {
+  Sfx.unlock(); if (!G) return;
+  if (e.pointerType === 'mouse'){ inp.mouse = {x:e.clientX / U, y:e.clientY / U}; return; }
+  inp.id = e.pointerId; inp.lx = e.clientX; inp.ly = e.clientY;
+});
+addEventListener('pointermove', e => {
+  if (e.pointerType === 'mouse'){ if (G) inp.mouse = {x:e.clientX / U, y:e.clientY / U}; return; }
+  if (e.pointerId !== inp.id) return;
+  inp.dx += (e.clientX - inp.lx) / U * TOUCH_SENS; inp.dy += (e.clientY - inp.ly) / U * TOUCH_SENS; inp.lx = e.clientX; inp.ly = e.clientY;
+});
+const release = e => { if (e.pointerId === inp.id) inp.id = null; };
+addEventListener('pointerup', release); addEventListener('pointercancel', release);
+addEventListener('keydown', e => {
+  const key = e.key.toLowerCase(); inp.keys[key] = true;
+  if (e.code === 'KeyP' || e.code === 'Escape'){ if (paused) resumeGame(); else pauseGame(); return; }
+  if (key.startsWith('arrow')) e.preventDefault();
+  if (e.key === 'Enter' || e.key === ' '){ if (!$('home').hidden) startPlay(); else if (!$('overlay').hidden) $('ovNew').click(); }
+});
+addEventListener('keyup', e => { inp.keys[e.key.toLowerCase()] = false; });
+
+// ================= drawing =================
+// an orbit drawn as a row of dots; `solid` draws the bright stretch ahead
+function orbit(rec, from, to, col, alpha, width, solid){
+  if (to <= from) return;
+  ctx.globalAlpha = alpha; ctx.strokeStyle = col; ctx.lineWidth = width * U; ctx.setLineDash(solid ? [] : [.01, U * 1.3]);
+  ctx.beginPath(); ctx.moveTo(rec[from * 2] * U, rec[from * 2 + 1] * U);
+  for (let i = from + 2; i <= to; i += 2) ctx.lineTo(rec[i * 2] * U, rec[i * 2 + 1] * U);
+  ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+}
+const easeBack = k => 1 + 2.2 * Math.pow(k - 1, 3) + 1.2 * Math.pow(k - 1, 2);
+function drawHole(h, t){
+  const a = Math.min(1, h.t / 18), s = (.3 + .7 * easeBack(a)) * HOLE_R * U, x = h.x * U, y = h.y * U;
+  ctx.save(); ctx.translate(x, y); ctx.globalAlpha = a;
+  const lens = ctx.createRadialGradient(0, 0, s * .8, 0, 0, s * 3.2); lens.addColorStop(0, 'rgba(167,139,250,.35)'); lens.addColorStop(1, 'rgba(167,139,250,0)'); ctx.fillStyle = lens; ctx.fillRect(-s * 3.2, -s * 3.2, s * 6.4, s * 6.4);
+  // the accretion disc: two tilted rings spinning at different speeds
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 2; i++){ ctx.save(); ctx.rotate(t * (i ? -1.3 : 2.1) + i); ctx.scale(1, .38);
+    const g = ctx.createLinearGradient(-s * 2, 0, s * 2, 0); g.addColorStop(0, 'rgba(255,170,90,.9)'); g.addColorStop(.5, 'rgba(167,139,250,.5)'); g.addColorStop(1, 'rgba(110,231,255,.9)');
+    ctx.strokeStyle = g; ctx.lineWidth = s * (i ? .25 : .4); ctx.beginPath(); ctx.arc(0, 0, s * (1.55 + i * .35), 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(0, 0, s, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,220,180,.7)'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, s * 1.04, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+function drawComet(tail, x, y, alpha){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round';
+  const n = tail.length / 2;
+  for (let i = 1; i < n; i++){ const k = i / n; ctx.globalAlpha = k * .5 * alpha; ctx.strokeStyle = CYAN; ctx.lineWidth = PLAYER_R * 1.6 * k * U;
+    ctx.beginPath(); ctx.moveTo(tail[i * 2 - 2] * U, tail[i * 2 - 1] * U); ctx.lineTo(tail[i * 2] * U, tail[i * 2 + 1] * U); ctx.stroke(); }
+  ctx.restore();
+  blit(SPR.you, x, y, 1, 0, alpha, true);
+}
+function drawGame(t){
+  const f = Math.min(G.frame, M.loop - 1);
+  ctx.lineCap = ctx.lineJoin = 'round';
+  // what you have flown this loop: tomorrow's afterimage
+  orbit(G.rec, 0, Math.max(0, G.frame - 1), CYAN, .3, .35, false);
+  // each afterimage's whole orbit as dots, and the next three-quarters of a second as a bright streak
+  for (const e of G.echoes){ const col = ECHO_COLS[e.col], end = Math.min(M.loop - 1, f + 45);
+    orbit(e.rec, 0, M.loop - 1, col, .55, .45, false);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; orbit(e.rec, f, end, col, .25, 1.6, true); orbit(e.rec, f, end, col, .85, .5, true); ctx.restore(); }
+  if (G.hole) drawHole(G.hole, t);
+  if (!G.star.taken){ const s = G.star, a = Math.min(1, s.t / 14), pulse = 1 + Math.sin(t * 5) * .08;
+    blit(SPR.star, s.x, s.y, (.3 + .7 * easeBack(a)) * pulse, t * .6, a, true); }
+  // afterimages materialise at the start of each loop and can't hurt you until they are solid
+  const k = Math.min(1, G.frame / GRACE), sc = G.frame < GRACE ? .4 + .6 * easeBack(k) : 1;
+  for (const e of G.echoes){ const ex = e.rec[f * 2], ey = e.rec[f * 2 + 1];
+    // a short smear of where it just was
+    for (let j = 3; j >= 1; j--){ const tf = Math.max(0, f - j * 4); blit(SPR.echo[e.col], e.rec[tf * 2], e.rec[tf * 2 + 1], sc * (1 - j * .12), 0, (.35 - j * .09) * k, true); }
+    blit(SPR.echo[e.col], ex, ey, sc, 0, .35 + .65 * k);
+    if (G.frame < GRACE){ ctx.strokeStyle = rgba(ECHO_COLS[e.col], 1 - k); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(ex * U, ey * U, ECHO_R * U * (1 + (1 - k) * 3), 0, Math.PI * 2); ctx.stroke(); }
+  }
+  if (!over) drawComet(G.tail, G.px, G.py, G.inv > 0 && (G.inv >> 3) % 2 ? .35 : 1);
+  $('timerFill').style.transform = `scaleX(${G.frame / M.loop})`;
+  $('timer').className = G.star.taken ? 'done' : G.frame > M.loop - 90 ? 'warn' : '';
+}
+// behind the menu: afterimages circle a resting comet on dotted orbits
+const demoOrbits = [[.36, .2, -.4, .5], [.26, .3, .5, -.7], [.44, .14, .15, .35], [.2, .12, -1.1, -1.1]];
+function drawDemo(t){
+  const cx = AW / 2, cy = AH * .52, tail = [];
+  ctx.lineCap = 'round';
+  demoOrbits.forEach(([rx, ry, a, sp], i) => {
+    const RX = rx * AW, RY = ry * AH, col = ECHO_COLS[i], ph = t * sp + i * 1.7;
+    ctx.globalAlpha = .45; ctx.strokeStyle = col; ctx.lineWidth = .45 * U; ctx.setLineDash([.01, U * 1.3]);
+    ctx.beginPath(); ctx.ellipse(cx * U, cy * U, RX * U, RY * U, a, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    const pos = p => [cx + Math.cos(p) * RX * Math.cos(a) - Math.sin(p) * RY * Math.sin(a), cy + Math.cos(p) * RX * Math.sin(a) + Math.sin(p) * RY * Math.cos(a)];
+    for (let j = 3; j >= 1; j--){ const [x, y] = pos(ph - j * .06 * Math.sign(sp)); blit(SPR.echo[i], x, y, 1 - j * .12, 0, .3 - j * .08, true); }
+    const [x, y] = pos(ph); blit(SPR.echo[i], x, y);
+  });
+  for (let j = 18; j >= 0; j--) tail.push(cx + Math.sin((t - j * .03) * .7) * 6, cy + Math.cos((t - j * .03) * .5) * 4);
+  drawComet(tail, tail[tail.length - 2], tail[tail.length - 1], 1);
+}
+function drawFx(dt){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (let i = sparks.length - 1; i >= 0; i--){ const p = sparks[i];
+    if (p.pull){ p.vx += (p.pull.x - p.x) * 6 * dt; p.vy += (p.pull.y - p.y) * 6 * dt; }
+    p.x += p.vx * dt; p.y += p.vy * dt; const drag = Math.pow(p.pull ? .2 : .05, dt); p.vx *= drag; p.vy *= drag; p.life -= dt;
+    if (p.life <= 0 || (p.pull && Math.hypot(p.pull.x - p.x, p.pull.y - p.y) < .6)){ sparks.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, p.life / p.max * 2); ctx.fillStyle = p.col; ctx.beginPath(); ctx.arc(p.x * U, p.y * U, p.r * U, 0, Math.PI * 2); ctx.fill(); }
+  for (let i = waves.length - 1; i >= 0; i--){ const w = waves[i]; w.t += dt; const k = w.t / w.life;
+    if (k >= 1){ waves.splice(i, 1); continue; }
+    ctx.globalAlpha = (1 - k) * .8; ctx.strokeStyle = w.col; ctx.lineWidth = (1 - k) * 3 + .5; ctx.beginPath(); ctx.arc(w.x * U, w.y * U, w.max * (1 - Math.pow(1 - k, 3)) * U, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.restore();
+}
+
+// ================= frame =================
+let last = 0, acc = 0;
+function frame(ts){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.1, (ts - (last || ts)) / 1000); last = ts; now = ts;
+  acc += dt; let n = 0; while (acc >= STEP && n < 6){ update(); acc -= STEP; n++; } if (n >= 6) acc = 0;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (shake > .2) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake); shake *= Math.pow(.004, dt);
+  ctx.drawImage(bgA, 0, 0, W, H);
+  if (bgFade > 0){ ctx.globalAlpha = bgFade; ctx.drawImage(bgB, 0, 0, W, H); ctx.globalAlpha = 1; bgFade = Math.max(0, bgFade - dt * .8); }
+  if (G) drawGame(ts / 1000); else drawDemo(ts / 1000);
+  drawFx(dt);
+}
+
+// ================= sound: glassy chimes with a long echo, the void answering back =================
+const Sfx = (() => {
+  let ac = null, out = null, verb = null;
+  const unlock = () => { if (ac){ ac.resume && ac.resume(); return; } try {
+    ac = new (window.AudioContext || window.webkitAudioContext)(); out = ac.createGain(); out.gain.value = .55; out.connect(ac.destination);
+    // a long feedback echo: every sound leaves its own afterimage
+    verb = ac.createDelay(); verb.delayTime.value = .28; const fb = ac.createGain(); fb.gain.value = .38; const damp = ac.createBiquadFilter(); damp.type = 'lowpass'; damp.frequency.value = 2400;
+    const wet = ac.createGain(); wet.gain.value = .26; verb.connect(damp); damp.connect(fb); fb.connect(verb); damp.connect(wet); wet.connect(out);
+  } catch(e){} };
+  function tone(f0, f1, dur, type = 'sine', vol = .15, delay = 0){
+    if (!ac || !sound) return; const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), gn = ac.createGain(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .006); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(out); if (verb) gn.connect(verb); o.start(t); o.stop(t + dur + .03);
+  }
+  function noise(dur, vol, f){ if (!ac || !sound) return; const t = ac.currentTime, b = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+    const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), gn = ac.createGain(); s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; gn.gain.value = vol; s.connect(bp); bp.connect(gn); gn.connect(out); s.start(t); }
+  const hz = n => 392 * Math.pow(2, n / 12);   // G4 up
+  const chime = n => { const f = hz(n); tone(f, f, 1.2, 'sine', .18); tone(f * 2, f * 2, .5, 'triangle', .03); tone(f * 3.01, f * 3.01, .25, 'sine', .02); };
+  const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];   // each star rings one step higher, then the tune folds back
+  return {unlock,
+    star:n => chime(PENTA[(n - 1) % PENTA.length]),
+    near:() => tone(2200, 3000, .07, 'sine', .03),
+    loop:() => tone(hz(-24), hz(-24) * .98, .7, 'sine', .07),
+    wrong:() => { tone(160, 70, .35, 'sawtooth', .05); noise(.25, .07, 500); },
+    hole:() => { tone(220, 50, .9, 'sine', .14); [12, 7, 0].forEach((s, i) => tone(hz(s), hz(s), .6, 'sine', .05, .1 + i * .1)); },
+    start:() => [0, 7, 12].forEach((s, i) => tone(hz(s), hz(s), .8, 'sine', .07, i * .09)),
+    tick:() => noise(.035, .05, 3200),
+    lose:() => { noise(.8, .12, 300); [7, 4, 0, -5].forEach((s, i) => tone(hz(s), hz(s) * .97, 1, 'sine', .08, i * .2)); },
+  };
+})();
+
+// ================= start =================
+paintSound(); resize();
+const splashT0 = performance.now(); $('splashBar').style.width = '50%';
+const begin = () => {
+  $('splashBar').style.width = '100%'; mode = MODES[store.mode] ? store.mode : 'classic'; M = MODES[mode]; shelfMode = mode;
+  makeSprites(); paintBg(bgA, TIMES[timeIdx]); showHome();
+  requestAnimationFrame(frame);
+  setTimeout(() => { $('splash').classList.add('out'); setTimeout(() => $('splash').remove(), 550); }, Math.max(0, 1600 - (performance.now() - splashT0)));
+};
+(document.fonts && document.fonts.load ? Promise.all([document.fonts.load("800 60px Unbounded"), document.fonts.load("600 16px 'Space Grotesk'")]).catch(() => {}) : Promise.resolve()).then(begin);
+})();
+</script>
+<script>// Runs inside each game page, after the game's own code. It adds a way back to the arcade and turns finished rounds into XP.
+(() => {
+  const GAME = window.ARCADE_GAME, A = window.Arcade, P = window.PLATFORM || (window.PLATFORM = {});
+  if (!GAME || !A) return;
+  A.state.last = GAME; A.save();
+
+  // back to the arcade: a key in the game's own top bar, drawn in that game's own style
+  const top = document.getElementById('homeTop');
+  if (top){
+    // borrow the class of the game's own top-bar buttons ('key' in most games, 'chip' in Tightrope)
+    const own = top.querySelector('button'), cls = own && own.classList.contains('chip') ? 'chip' : 'key';
+    const b = document.createElement('button'); b.className = cls; b.id = 'arcadeBack'; b.setAttribute('aria-label', 'Back to all games');
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6"/></svg><span>Games</span>';
+    b.onclick = e => { e.stopPropagation(); location.href = '../index.html'; };
+    top.prepend(b);
+    // Tightrope's chips are light-on-dark: its icons are white, so the label is too
+    if (cls === 'chip') b.style.color = '#fff';
+  }
+  const css = document.createElement('style');
+  css.textContent = `#arcadeBack{margin-right:auto;display:inline-flex;align-items:center;gap:4px;padding:0 14px 0 8px!important;font-weight:700;font-size:15px}
+    #arcadeBack svg{width:20px;height:20px}
+    #homeTop{justify-content:flex-end}
+    .arcadeToast{position:fixed;left:50%;top:calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
+      font:700 14px/1.2 system-ui,-apple-system,sans-serif;color:#fff;animation:arcIn .35s cubic-bezier(.2,1.4,.4,1) both, arcOut .4s ease 3.4s forwards}
+    .arcadeToast b{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;background:rgba(20,18,40,.88);box-shadow:0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+    .arcadeToast b i{font-style:normal;color:#ffd23f}
+    .arcadeToast small{padding:6px 12px;border-radius:999px;background:rgba(62,224,197,.92);color:#0d2a26;font-weight:800;white-space:nowrap}
+    @keyframes arcIn{from{opacity:0;transform:translate(-50%,-14px) scale(.9)}}
+    @keyframes arcOut{to{opacity:0;transform:translate(-50%,-10px)}}`;
+  // no text selection, magnifier loupe or callout on a long press in any game (iOS shows them on plain text otherwise)
+  css.textContent += `*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}input,textarea{-webkit-user-select:text;user-select:text}`;
+  addEventListener('contextmenu', e => e.preventDefault()); document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+  document.head.appendChild(css);
+
+  // every finished round counts toward the player's arcade level and today's missions
+  const orig = P.onGameOver;
+  P.onGameOver = function(r){
+    let res = null; try { res = A.report(GAME, r); } catch(e){}
+    if (res) setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'arcadeToast';
+      t.innerHTML = `<b><i>+${res.gain} XP</i>${res.levelUp ? ` · Level ${res.levelUp}!` : ''}</b>` + res.done.map(d => `<small>✓ ${d}</small>`).join('');
+      document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+    }, 900);
+    return orig ? orig.apply(this, arguments) : undefined;
+  };
+})();
+</script>
+</body>
+</html>

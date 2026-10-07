@@ -1,0 +1,1054 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.ARCADE_GAME = "neon-2048";
+// Curio: the shared layer every page loads (the hub and each game).
+// One save ('arcade-v1') holds the player's level, daily missions and streak; each game keeps its own save untouched.
+window.Arcade = (() => {
+  const KEY = 'arcade-v1';
+  const GAMES = [
+    {id:'neon-2048', name:'Neon 2048', blurb:'Slide and merge tiles of light', color:'#ff8a3d', cat:'puzzle'},
+    {id:'neon-blocks', name:'Neon Blocks', blurb:'Stack, clear and light up the well', color:'#ff4d8d', cat:'puzzle'},
+    {id:'neon-orbit', name:'Neon Orbit', blurb:'Turn the ring, fire, light up the core', color:'#ffd23f', cat:'reflex'},
+    {id:'neon-fuse', name:'Neon Fuse', blurb:'Turn the wires, keep the spark alive', color:'#3ee0c5', cat:'puzzle'},
+    {id:'neon-tilt', name:'Neon Tilt', blurb:'Tilt the board, roll every ball home', color:'#5aa9ff', cat:'puzzle'},
+    {id:'paper-echo', name:'Paper Echo', blurb:'Paper birds sing, you sing it back', color:'#f2b84b', cat:'calm'},
+    {id:'afterimage', name:'Afterimage', blurb:'Your past self is right behind you', color:'#8f7bff', cat:'reflex'},
+    {id:'halves', name:'Halves', blurb:'One swipe, two equal halves', color:'#ffd400', cat:'puzzle'},
+    {id:'tightrope', name:'Tightrope', blurb:'Keep your balance high above the city', color:'#ff6b5b', cat:'reflex'},
+    {id:'lily', name:'Lily', blurb:'A frog, a pond, a night of fireflies', color:'#e8c26a', cat:'reflex'},
+    {id:'steep', name:'Steep', blurb:'A little tea house, poured by hand', color:'#d9733f', cat:'calm'},
+    {id:'deckload', name:'Deckload', blurb:'Load her up, keep her level', color:'#e8a33a', cat:'physics'},
+    {id:'tidepool', name:'Tidepool', blurb:'Send the tide, settle every creature', color:'#3fb8c4', cat:'puzzle'},
+    {id:'kite', name:'Kite', blurb:'Ride the gusts, mind the line', color:'#ff7a59', cat:'reflex'},
+    {id:'neon-pour', name:'Neon Pour', blurb:'Pour the light, sort every colour', color:'#c86bff', cat:'puzzle'},
+    {id:'neon-bolts', name:'Neon Bolts', blurb:'Spin the nuts, light every bolt', color:'#3ee0c5', cat:'puzzle'},
+    {id:'pottery', name:'Pottery', blurb:'Throw it, fire it, put it on the shelf', color:'#d9733f', cat:'calm'},
+  ];
+  // shelf tabs, in the order they appear
+  const CATS = [{id:'puzzle', name:'Puzzle'}, {id:'reflex', name:'Reflex'}, {id:'calm', name:'Calm'}, {id:'physics', name:'Build'}];
+  const byId = Object.fromEntries(GAMES.map(g => [g.id, g]));
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const dayNum = s => Math.round(new Date(s + 'T12:00:00').getTime() / 864e5);
+
+  let S;
+  function load(){
+    try { S = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ S = null; }
+    S = Object.assign({xp:0, runs:{}, best:{}, played:0, streak:{last:'', days:0}, daily:null, last:null, noads:false, seen:false}, S || {});
+  }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+  load();
+
+  // levels: each one asks a little more than the last
+  const need = L => 100 + (L - 1) * 40;
+  function level(){ let L = 1, x = S.xp; while (x >= need(L)){ x -= need(L); L++; } return {level:L, into:x, need:need(L)}; }
+
+  // three missions a day, from three different games, the same for the whole day
+  function rng(seed){ let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function daily(){
+    const d = today();
+    if (S.daily && S.daily.date === d) return S.daily;
+    const R = rng(dayNum(d) * 7919), pool = GAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const list = pool.slice(0, 3).map((g, i) => {
+      const best = S.best[g.id] || 0, kind = i === 0 ? 'play' : best > 0 && R() < .6 ? 'score' : i === 2 ? 'best' : 'play';
+      if (kind === 'score') return {game:g.id, kind, target:Math.max(1, Math.round(best * (.45 + R() * .2))), prog:0, done:false};
+      if (kind === 'best') return {game:g.id, kind, target:1, prog:0, done:false};
+      return {game:g.id, kind:'play', target:2 + Math.floor(R() * 2), prog:0, done:false};
+    });
+    S.daily = {date:d, list, bonus:false}; save(); return S.daily;
+  }
+  const missionText = m => { const n = byId[m.game].name;
+    return m.kind === 'play' ? `Play ${m.target} rounds of ${n}` : m.kind === 'score' ? `Score ${m.target.toLocaleString('en-US')} in ${n}` : `Beat your best in ${n}`; };
+
+  // a finished round from any game: XP, missions, streak
+  function report(game, r){
+    r = r || {}; const score = +r.score || 0, newBest = !!r.newBest;
+    S.runs[game] = (S.runs[game] || 0) + 1; S.played++; S.last = game;
+    if (score > (S.best[game] || 0)) S.best[game] = score;
+    const before = level().level; let gain = 20 + (newBest ? 25 : 0); const done = [];
+    for (const m of daily().list){ if (m.done || m.game !== game) continue;
+      if (m.kind === 'play') m.prog++; else if (m.kind === 'score') m.prog = Math.max(m.prog, score); else if (newBest) m.prog = 1;
+      if (m.prog >= m.target){ m.done = true; gain += 100; done.push(missionText(m)); } }
+    if (!S.daily.bonus && S.daily.list.every(m => m.done)){ S.daily.bonus = true; gain += 150; done.push('All three missions'); }
+    // a day with at least one finished round keeps the streak going
+    const d = today(); if (S.streak.last !== d){ S.streak.days = S.streak.last && dayNum(d) - dayNum(S.streak.last) === 1 ? S.streak.days + 1 : 1; S.streak.last = d; }
+    S.xp += gain; save();
+    const after = level().level;
+    return {gain, done, levelUp:after > before ? after : 0};
+  }
+  const streak = () => { const d = today(); return S.streak.last && dayNum(d) - dayNum(S.streak.last) <= 1 ? S.streak.days : 0; };
+  return {GAMES, CATS, byId, get state(){ return S; }, level, daily, missionText, report, streak, save, reload:load};
+})();
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Neon 2048</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Sora:wght@400;500;600;700&family=Neonderthaw&display=swap" rel="stylesheet">
+<style>
+/* HUD speaks the tiles' language: solid keycaps with a thick lower edge, no glass. The score is the one loud thing. */
+:root{--night:#0e0a24;--panel:#1b1442;--key:#2b2163;--key-edge:#160f38;--orange:#ff8a3c;--orange-edge:#b4501a;--blue:#3a4888;--text:#efeaff;--dim:#a99fd6;
+  --num:'Russo One',system-ui,sans-serif;--ui:'Sora',system-ui,sans-serif;--st:var(--safe-top,env(safe-area-inset-top,0px));--sb:var(--safe-bottom,env(safe-area-inset-bottom,0px))}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--night);color:var(--text);font-family:var(--ui);user-select:none;-webkit-user-select:none;touch-action:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+#fx{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+.ft{position:absolute;left:0;top:0;font-family:var(--num);white-space:nowrap;transform:translate(-50%,-50%);will-change:transform,opacity}
+button{font:inherit;color:inherit;border:0;cursor:pointer;background:none;padding:0}
+button:focus-visible{outline:2px solid var(--orange);outline-offset:3px}
+
+/* top: mode switch + best on one line, the score big underneath */
+#hud{position:fixed;left:0;right:0;top:calc(var(--st) + 14px);display:flex;justify-content:center;pointer-events:none;z-index:2}
+.bar{width:min(460px,calc(100vw - 32px));display:grid;grid-template-columns:1fr auto;align-items:end;row-gap:2px}
+.modechip{pointer-events:auto;justify-self:start;display:flex;align-items:center;gap:6px;font-size:15px;font-weight:600;color:var(--dim);padding:4px 0}
+.modechip svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.modechip .grid{display:grid;gap:1.5px;width:16px;height:16px}
+.modechip .grid i{background:var(--dim);border-radius:1px;opacity:.8}
+.best{justify-self:end;font-size:15px;font-weight:500;color:var(--dim)}
+.best b{font-family:var(--num);font-weight:400;color:var(--text);margin-left:4px}
+.scoreline{grid-column:1 / -1;display:flex;align-items:baseline;gap:10px}
+#score{font-family:var(--num);font-size:56px;line-height:1;letter-spacing:-.01em;font-variant-numeric:tabular-nums;text-shadow:0 4px 0 var(--key-edge)}
+#score.bump{animation:bump .28s}
+@keyframes bump{40%{transform:translateY(-3px)}}
+
+/* timer: a plain track under the score */
+#timer{position:fixed;left:50%;transform:translateX(-50%);top:calc(var(--st) + 104px);width:min(460px,calc(100vw - 32px));height:8px;border-radius:4px;background:var(--panel);overflow:hidden;z-index:2}
+#timer i{display:block;height:100%;width:100%;background:var(--blue);border-radius:4px;transition:width .2s linear}
+#timer.low i{background:var(--orange)}
+#timerText{position:fixed;z-index:2;right:calc((100vw - min(460px,100vw - 32px)) / 2);top:calc(var(--st) + 56px);font-family:var(--num);font-weight:400;font-size:30px;line-height:1;color:var(--text);font-variant-numeric:tabular-nums}
+#timerText.low{color:var(--orange)}
+
+/* keycaps */
+.key{height:52px;min-width:52px;padding:0 16px;border-radius:14px;display:inline-grid;place-items:center;background:var(--key);box-shadow:0 5px 0 var(--key-edge);font-weight:600;font-size:15px;transition:transform .07s,box-shadow .07s}
+.key:active{transform:translateY(4px);box-shadow:0 1px 0 var(--key-edge)}
+.key:disabled{opacity:.35;pointer-events:none}
+.key svg{width:22px;height:22px;fill:none;stroke:var(--text);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.key.primary{background:var(--orange);box-shadow:0 5px 0 var(--orange-edge);color:#2a1100;font-family:var(--num);font-weight:400;font-size:18px;padding:0 28px}
+.key.primary:active{box-shadow:0 1px 0 var(--orange-edge)}
+#soundBtn.off svg .wave,#homeSound.off svg .wave{display:none}#soundBtn svg .x,#homeSound svg .x{display:none}#soundBtn.off svg .x,#homeSound.off svg .x{display:inline}
+#bottom{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 22px);display:flex;justify-content:center;align-items:center;gap:10px;z-index:2}
+#hint{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 92px);z-index:2;text-align:center;font-size:13px;color:var(--dim);transition:opacity .6s}
+
+/* power cards sit above the keys like two spare tiles */
+#powers{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 92px);display:flex;justify-content:center;gap:10px;z-index:2}
+.pcard{position:relative;height:44px;padding:0 16px;border-radius:12px;display:flex;align-items:center;gap:8px;background:var(--panel);box-shadow:0 4px 0 var(--key-edge);font-weight:600;font-size:14px;transition:transform .07s}
+.pcard .pi{display:grid}
+.pcard em{font-style:normal;font-family:var(--num);color:var(--dim)}
+.pcard:disabled{opacity:.35}
+.pcard.on{background:var(--orange);color:#2a1100;box-shadow:0 4px 0 var(--orange-edge)}.pcard.on em{color:#2a1100}
+#tip{position:fixed;left:50%;transform:translateX(-50%);top:calc(var(--st) + 120px);z-index:3;padding:8px 14px;border-radius:10px;background:var(--panel);font-size:14px;font-weight:500;white-space:nowrap}
+
+/* sheets: game over + modes. Solid panels, sentence case. */
+#overlay,#modes{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(8,5,22,.62);animation:fade .25s}
+@keyframes fade{from{opacity:0}}
+.card,.mwrap{width:min(460px,100%);background:var(--panel);border-radius:22px;padding:22px 20px 18px;box-shadow:0 -2px 0 rgba(255,255,255,.04) inset;animation:up .3s cubic-bezier(.2,1.2,.4,1)}
+@keyframes up{from{transform:translateY(30px);opacity:0}}
+.card{display:grid;gap:16px}
+.card h2{margin:0;font-family:var(--num);font-weight:400;font-size:32px;line-height:1.05}
+.card h2.win{color:#ffd84a}.card h2.lose{color:var(--text)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-radius:14px;background:var(--night);padding:12px 4px}
+.stats div{text-align:center}
+.stats div + div{border-left:1px solid #2a2256}
+.stats small{display:block;font-size:12px;color:var(--dim)}
+.stats b{font-family:var(--num);font-weight:400;font-size:22px}
+.row{display:flex;gap:10px}.row .key{flex:1}
+.link{justify-self:center;font-size:14px;color:var(--dim);text-decoration:underline;text-underline-offset:3px}
+.card .key.wide{width:100%}
+#modes{place-items:end center}
+.mwrap{max-height:calc(100% - var(--st));overflow:auto;display:grid;gap:4px;padding:18px 12px 12px}
+.mhead{display:flex;justify-content:space-between;align-items:center;padding:0 8px 8px}
+.mhead h2{margin:0;font-family:var(--num);font-weight:400;font-size:24px}
+.key.small{height:40px;min-width:40px;padding:0;border-radius:12px}
+.key.small svg{width:18px;height:18px}
+.mgrid{display:grid;gap:4px}
+.mcard{display:grid;grid-template-columns:44px 1fr auto;gap:14px;align-items:center;text-align:left;padding:12px 10px;border-radius:14px;position:relative}
+.mcard:active{background:#241b52}
+.mcard.cur{background:#241b52}
+.mcard.cur::before{content:'';position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--orange)}
+.mcard .glyph{width:44px;height:44px;display:grid;place-items:center;border-radius:10px;background:var(--night);font-size:20px}
+.mcard .glyph .g{display:grid;gap:2px;width:26px;height:26px}
+.mcard .glyph .g i{background:var(--blue);border-radius:2px}
+.mcard .glyph .g i.r{background:#5a5276}
+.mcard b{display:block;font-weight:600;font-size:16px}
+.mcard p{margin:2px 0 0;font-size:13px;color:var(--dim);line-height:1.35}
+.mcard .bst{text-align:right;font-family:var(--num);font-size:16px;color:var(--text)}
+.mcard .bst small{display:block;font-family:var(--ui);font-size:11px;color:var(--dim)}
+.mcard .resume{font-size:11px;color:var(--orange);font-weight:600}
+/* new-zone banner */
+.zone{position:fixed;left:0;right:0;top:40%;z-index:3;text-align:center;font-family:var(--num);font-size:34px;pointer-events:none;color:#fff;text-shadow:0 4px 0 rgba(0,0,0,.35);animation:zone 2.6s ease forwards}
+.zone small{display:block;font-family:var(--ui);font-weight:500;font-size:14px;color:var(--dim);margin-bottom:6px}
+@keyframes zone{0%{opacity:0;transform:translateY(10px)}15%{opacity:1;transform:none}75%{opacity:1}100%{opacity:0;transform:translateY(-14px)}}
+#splash{position:fixed;inset:0;z-index:20;background:var(--night);display:grid;place-items:center;transition:opacity .5s ease,transform .5s ease}
+#splash.out{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .mark{display:grid;justify-items:center;gap:26px}
+#splash .word{font-family:var(--num);font-size:52px;line-height:1;color:var(--text);text-shadow:0 5px 0 var(--key-edge)}
+#splash .word b{font-weight:400;color:var(--orange)}
+#splash .blocks{display:flex;gap:10px;height:64px;align-items:flex-end}
+#splash .blk{width:56px;height:56px;border-radius:12px;display:grid;place-items:center;font-family:var(--num);font-size:24px;color:#fff;box-shadow:0 6px 0 rgba(0,0,0,.35);opacity:0;transform:translateY(-40px);animation:drop .45s cubic-bezier(.3,1.5,.5,1) forwards}
+#splash .blk:nth-child(1){background:#3a4888;animation-delay:.15s}#splash .blk:nth-child(2){background:#ff8a3c;animation-delay:.3s}
+#splash .blk:nth-child(3){background:#9b5cff;animation-delay:.45s}#splash .blk:nth-child(4){background:#ffc93a;color:#4a2400;font-size:17px;animation-delay:.6s}
+@keyframes drop{to{opacity:1;transform:none}}
+#splash .bar{width:180px;height:6px;border-radius:3px;background:var(--panel);overflow:hidden}
+#splash .bar i{display:block;height:100%;width:0;border-radius:3px;background:var(--orange);transition:width .3s}
+/* logo: a neon-sign 'Neon' over the four digits as game tiles */
+.logo2{display:grid;justify-items:center;gap:2px}
+.logo2 .tube{font-family:'Neonderthaw',cursive;font-size:84px;line-height:.9;color:#ffe6f7;
+  text-shadow:0 0 4px #fff,0 0 10px #ff4fd8,0 0 22px #ff4fd8,0 0 44px #ff2fb8;animation:flick 1.6s .4s both}
+@keyframes flick{0%,8%,12%,22%{opacity:.15;text-shadow:none}10%,20%,100%{opacity:1}}
+.logo2 .tiles{display:flex;gap:8px}
+.logo2 .tiles i{font-style:normal;width:64px;height:64px;border-radius:14px;display:grid;place-items:center;font-family:var(--num);font-size:42px;color:#fff;box-shadow:0 7px 0 rgba(0,0,0,.4),inset 0 2px 0 rgba(255,255,255,.35);text-shadow:0 3px 0 rgba(0,0,0,.25)}
+.logo2 .tiles i:nth-child(1){background:#3a4888;transform:translateY(6px) rotate(-4deg)}
+.logo2 .tiles i:nth-child(2){background:#9b5cff;transform:rotate(2deg)}
+.logo2 .tiles i:nth-child(3){background:#ff8a3c;transform:translateY(4px) rotate(-2deg)}
+.logo2 .tiles i:nth-child(4){background:#ffc93a;color:#4a2400;transform:translateY(-2px) rotate(4deg)}
+.logo2.small .tube{font-size:62px}
+#splash .logo2 .tiles i{opacity:0;animation:tileIn .45s cubic-bezier(.3,1.5,.5,1) forwards}
+@keyframes tileIn{from{opacity:0;translate:0 -40px}to{opacity:1;translate:0 0}}
+#splash .logo2 .tiles i:nth-child(2){animation-delay:.12s}#splash .logo2 .tiles i:nth-child(3){animation-delay:.24s}#splash .logo2 .tiles i:nth-child(4){animation-delay:.36s}.logo2.small .tiles i{width:48px;height:48px;font-size:30px;border-radius:11px}
+
+/* home: the scene keeps floating behind; wordmark up top, the mode and the play key at thumb height */
+#home{position:fixed;inset:0;z-index:4;display:grid;grid-template-rows:auto auto 1fr auto;padding:calc(var(--st) + 10px) 0 calc(var(--sb) + 22px);background:radial-gradient(120% 70% at 50% 35%,rgba(14,10,36,0),rgba(14,10,36,.55))}
+#homeTop{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:0 16px;min-height:44px}
+#homeTop .key{height:42px;min-width:42px;padding:0 10px;border-radius:12px}
+#homeTop .key svg{width:20px;height:20px}
+#home .word{justify-self:center;text-align:center;margin-top:8px}
+#home .word small{display:block;font-family:var(--ui);font-weight:500;font-size:15px;color:var(--dim);margin-top:20px}
+/* the shelf: one card per mode, the centred card is the one Play starts */
+#shelf{align-self:center;display:flex;gap:14px;overflow-x:auto;scroll-snap-type:x mandatory;padding:18px calc(50vw - 115px) 22px;scrollbar-width:none;touch-action:pan-x}
+#shelf::-webkit-scrollbar{display:none}
+.mcard2{flex:0 0 230px;scroll-snap-align:center;border-radius:22px;padding:16px;background:var(--panel);box-shadow:0 6px 0 var(--key-edge);text-align:left;display:grid;gap:10px;transition:transform .25s,opacity .25s;opacity:.55;transform:scale(.92)}
+.mcard2.on{opacity:1;transform:none}
+.mcard2 .mini{position:relative;aspect-ratio:1;border-radius:14px;background:var(--night);padding:10px;display:grid;gap:5px}
+.mcard2 .mini i{border-radius:5px;background:#1d1648;display:grid;place-items:center;font-family:var(--num);font-size:12px;color:#fff;box-shadow:inset 0 -3px 0 rgba(0,0,0,.25)}
+.mcard2 .mini i.r{background:#4d4568}
+.mcard2 .mini .badge{position:absolute;right:-6px;top:-6px;width:38px;height:38px;border-radius:12px;background:var(--orange);color:#2a1100;display:grid;place-items:center;box-shadow:0 4px 0 var(--orange-edge)}
+.mcard2 .mini .badge svg{width:22px;height:22px}
+.mcard2 b{font-weight:600;font-size:19px}
+.mcard2 p{margin:-6px 0 0;font-size:13px;color:var(--dim);line-height:1.35;min-height:36px}
+.mcard2 .meta{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--dim)}
+.mcard2 .meta span b{font-family:var(--num);font-weight:400;font-size:17px;color:var(--text);margin-left:4px}
+.mcard2 .meta em{font-style:normal;color:var(--orange);font-weight:600}
+#dots{display:flex;justify-content:center;gap:7px;margin-top:-6px}
+#dots i{width:7px;height:7px;border-radius:4px;background:#3a3170;transition:width .2s,background .2s}
+#dots i.on{width:20px;background:var(--orange)}
+#home .bottomset{width:min(420px,calc(100% - 32px));justify-self:center;display:grid;gap:14px}
+#playBtn{height:64px;font-size:24px;width:100%}
+/* short screens (iPhone SE and older): smaller logo and cards so Play stays on screen */
+@media (max-height:700px){
+  #home .word{margin-top:0}#home .word small{display:none}
+  #home .logo2 .tube{font-size:58px}#home .logo2 .tiles i{width:44px;height:44px;font-size:28px;border-radius:10px}
+  #shelf{padding:10px calc(50vw - 90px) 14px}.mcard2{flex-basis:180px;padding:12px;gap:8px}.mcard2 p{display:none}.mcard2 b{font-size:16px}
+  #playBtn{height:54px;font-size:20px}
+}
+@media (max-height:520px){ #home .logo2 .tiles{display:none} .mcard2{flex-basis:150px} #shelf{padding:6px calc(50vw - 75px) 10px} }
+/* ===== tablets: iPad portrait and landscape, Split View / Stage Manager windows from 600x700 up. Phones never match these
+   queries (--z stays 1), so their layout is untouched. Each UI layer is laid out in a smaller virtual box (its real size / --z)
+   and scaled up by --z, so keys, cards and text grow together; the playfield canvas keeps full resolution and resize() frames it. */
+:root{--z:1}
+@media (min-width:600px) and (min-height:800px){:root{--z:1.15}}
+@media (min-width:740px) and (min-height:900px){:root{--z:1.25}}
+@media (min-width:800px) and (min-height:1100px){:root{--z:1.35}}
+@media (min-width:1000px) and (min-height:1300px){:root{--z:1.5}}
+@media (min-width:900px) and (min-height:700px) and (orientation:landscape){:root{--z:1.1}}
+@media (min-width:1200px) and (min-height:950px) and (orientation:landscape){:root{--z:1.3}}
+@media (min-width:600px) and (min-height:700px){
+  #home,#overlay,#modes,#iosSheet{right:auto;bottom:auto;width:calc(100% / var(--z));height:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #hud{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #bottom,#powers,#hint{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 100%}
+  #powers,#hint{bottom:calc(var(--sb) + 22px + 70px * var(--z))}
+  /* the timer, its clock and the tip hang under the scaled HUD (whose top stays at --st + 14px) */
+  #timer{top:calc(var(--st) + 14px + 90px * var(--z));width:min(460px,calc(100vw / var(--z) - 32px));transform:translateX(-50%) scale(var(--z));transform-origin:50% 0}
+  #timerText{top:calc(var(--st) + 14px + 42px * var(--z));right:calc((100vw - min(460px * var(--z),100vw - 32px * var(--z))) / 2);transform:scale(var(--z));transform-origin:100% 0}
+  #tip{top:calc(var(--st) + 14px + 106px * var(--z));transform:translateX(-50%) scale(var(--z));transform-origin:50% 0}
+  #overlay,#modes,#iosSheet{place-items:center}
+  #shelf{padding-left:calc(50% - 115px);padding-right:calc(50% - 115px)}
+  .zone{font-size:calc(34px * var(--z))}.zone small{font-size:calc(14px * var(--z))}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition-duration:.01s!important}}
+</style>
+</head>
+<body>
+<div id="splash" role="status" aria-label="Loading"><div class="mark">
+  <div class="logo2 small"><span class="tube">Neon</span><span class="tiles"><i>2</i><i>0</i><i>4</i><i>8</i></span></div>
+  <div class="bar"><i id="splashBar"></i></div>
+</div></div>
+<div id="stage"></div>
+<div id="home" hidden>
+  <div id="homeTop">
+    <button class="key" id="homeSound" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+  </div>
+  <div class="word"><div class="logo2"><span class="tube">Neon</span><span class="tiles"><i>2</i><i>0</i><i>4</i><i>8</i></span></div><small>Slide, merge, light up the board</small></div>
+  <div style="display:grid;align-content:center"><div id="shelf"></div><div id="dots"></div></div>
+  <div class="bottomset"><button class="key primary" id="playBtn">Play</button></div>
+</div><div id="fx"></div>
+<div id="hud"><div class="bar">
+  <button class="modechip" id="modeChip" aria-label="Change mode"><span class="grid" id="modeIcon"></span><span id="modeName">Classic</span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+  <div class="best">Best<b id="best">0</b></div>
+  <div class="scoreline" id="scoreBox"><span id="score">0</span></div>
+</div></div>
+<div id="timer" hidden><i id="timerFill"></i></div><b id="timerText" hidden>2:00</b>
+<div id="hint">Swipe or use the arrow keys</div>
+<div id="powers" hidden>
+  <button class="pcard" id="bombBtn"><span class="pi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="14" r="6.5"/><path d="M15.5 9.5 18 7"/><path d="M19 3v2M21 5h-2M20.5 3.5l-1 1"/></svg></span>Bomb<em id="bombN">0</em></button>
+  <button class="pcard" id="swapBtn"><span class="pi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h14l-3-3M20 16H6l3 3"/></svg></span>Swap<em id="swapN">0</em></button>
+</div>
+<div id="tip" hidden></div>
+<div id="bottom">
+  <button class="key" id="undoBtn" aria-label="Undo" disabled><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+  <button class="key primary" id="newBtn">New game</button>
+  <button class="key" id="modesBtn" aria-label="Main menu"><svg viewBox="0 0 24 24"><path d="M3 11 12 4l9 7"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
+  <button class="key" id="soundBtn" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+</div>
+<div id="modes" hidden><div class="mwrap">
+  <div class="mhead"><h2>Pick a mode</h2><button class="key small" id="modesClose" aria-label="Close"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+  <div class="mgrid" id="modeGrid"></div>
+</div></div>
+<div id="overlay" hidden><div class="card">
+  <h2 id="ovTitle">You made 2048</h2>
+  <div class="stats"><div><small>Score</small><b id="stScore">0</b></div><div><small>Best</small><b id="stBest">0</b></div><div><small>Top tile</small><b id="stTop">0</b></div></div>
+  <div class="row"><button class="key" id="ovKeep">Keep going</button><button class="key primary" id="ovNew">New game</button></div>
+  <div class="row" id="ovRow2"><button class="key" id="ovModes">Main menu</button></div>
+</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/RoundedBoxGeometry.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>// Web build: no ads, purchases or native ratings. Keep web-only behaviour here.
+window.PLATFORM = {name: 'web'};
+</script>
+<script>
+(() => {
+'use strict';
+const MOVE_MS = 120, POP_MS = 220, STEP = 1.14;
+const SAVE = 'neon-2048-v1';
+// game modes: board size, goal tile, and the rule switches each mode turns on
+// glyph: the mode's board in miniature (rocks shown as grey cells); icon used for non-grid modes
+const MODES = {
+  classic: {name:'Classic',     size:4, goal:2048, desc:'The original 4×4. Reach 2048.'},
+  time:    {name:'Time Attack', size:4, goal:2048, desc:'Two minutes on the clock. Every merge adds a little time.', icon:'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2h5"/></svg>', timed:120},
+  hard:    {name:'Hard',        size:3, goal:512,  desc:'Nine cells, no room to breathe. Reach 512.'},
+  big:     {name:'Big Board',   size:5, goal:2048, desc:'A 5×5 board. Bigger tiles start to drop in as you climb.', grow:true},
+  huge:    {name:'Huge',        size:6, goal:4096, desc:'Thirty-six cells and bigger drops as you climb. Reach 4096.', grow:true},
+  rocks:   {name:'Obstacles',   size:4, goal:2048, desc:'Two stone blocks sit on the board and never move.', rocks:2},
+  power:   {name:'Power Up',    size:4, goal:2048, desc:'Merge to earn bombs and swaps, then use them to get unstuck.', icon:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="14" r="6.5"/><path d="M15.5 9.5 18 7"/><path d="M19 3v2M21 5h-2M20.5 3.5l-1 1"/></svg>', power:true},
+};
+const MODE_IDS = Object.keys(MODES);
+let mode = 'classic', M = MODES.classic, N = 4;
+const PLATFORM = window.PLATFORM || {name:'web'}; // platform hooks (ads, purchases, ratings) live in src/platform/*.js
+const PALETTE = {2:['#3a4888','#26305e'], 4:['#4d5fb0','#2e3b7a'], 8:['#ff8a3c','#e2541f'], 16:['#ff5e5e','#d6333f'], 32:['#ff3d8b','#c91f6a'],
+  64:['#e63cff','#a11fd6'], 128:['#9b5cff','#6a2fe0'], 256:['#5c7cff','#3450e0'], 512:['#2ec4ff','#1290d6'], 1024:['#2affc9','#0fbf96'], 2048:['#ffd84a','#ff9a1f'],
+  4096:['#ff3d5e','#c41f3c'], 8192:['#3dffa0','#14c472'], 16384:['#ff61d2','#c42fa0'], 32768:['#61a8ff','#2f6ad6']};
+const colorOf = v => PALETTE[v] || ['#ffd84a', '#ff9a1f'];
+const $ = id => document.getElementById(id);
+const UIZ = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--z')) || 1;   // tablet UI scale (1 on phones)
+const L = h => new THREE.Color(h).convertSRGBToLinear();
+
+// ================= renderer, camera, post =================
+const host = $('stage');
+const MOBILE_EARLY = matchMedia('(pointer:coarse)').matches;
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
+// resolution adapts to the device: start sharp, step down if frames run long, step back up when there is headroom
+const MOBILE = matchMedia('(pointer:coarse)').matches;
+const PR_MAX = Math.min(devicePixelRatio || 1, MOBILE ? 2.5 : 2), PR_MIN = Math.min(devicePixelRatio || 1, 1.25);
+let prNow = Math.min(PR_MAX, 2);
+renderer.setPixelRatio(prNow);
+renderer.toneMapping = THREE.NoToneMapping; // tone mapping + sRGB happen in the final pass
+renderer.shadowMap.enabled = true; renderer.shadowMap.autoUpdate = false; renderer.shadowMap.type = MOBILE_EARLY ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+host.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = L(0x07051a);
+const camera = new THREE.PerspectiveCamera(36, 1, .1, 200);
+const camBase = new THREE.Vector3();
+const RTO = {format:THREE.RGBAFormat, type:THREE.HalfFloatType};
+const rt = renderer.capabilities.isWebGL2 ? Object.assign(new THREE.WebGLMultisampleRenderTarget(16, 16, RTO), {samples:MOBILE ? 2 : 4}) : new THREE.WebGLRenderTarget(16, 16, RTO);
+const composer = new THREE.EffectComposer(renderer, rt);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(256, 256), .5, .35, 1.25);
+composer.addPass(bloom);
+// bloom is a blur: compute it at half resolution (a quarter of the pixels)
+const bloomSetSize = bloom.setSize.bind(bloom); bloom.setSize = (w, h) => bloomSetSize(Math.round(w / 2), Math.round(h / 2));
+composer.addPass(new THREE.ShaderPass({
+  uniforms:{tDiffuse:{value:null}},
+  vertexShader:'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:`uniform sampler2D tDiffuse; varying vec2 vUv;
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
+    void main(){ vec3 c = aces(texture2D(tDiffuse, vUv).rgb * .92);
+      float l = dot(c, vec3(.2126, .7152, .0722)); c = clamp(mix(vec3(l), c, 1.35), 0., 1.);
+      c = mix(c * 12.92, 1.055 * pow(c, vec3(1. / 2.4)) - .055, step(.0031308, c));
+      vec2 d = vUv - .5; c *= 1. - dot(d, d) * .5; gl_FragColor = vec4(c, 1.); }`}));
+const BOARD_PTS = [];
+function resize(){
+  BOARD_PTS.length = 0; const hb = STEP * N / 2 + .2;
+  for (const x of [-1, 1]) for (const z of [-1, 1]) for (const y of [-.55, .4]) BOARD_PTS.push(new THREE.Vector3(x * hb, y, z * hb));
+  const W = innerWidth, H = innerHeight;
+  renderer.setPixelRatio(prNow); renderer.setSize(W, H); composer.setPixelRatio(prNow); composer.setSize(W, H);
+  camera.aspect = W / H; camera.clearViewOffset();
+  const top = ($('hud').getBoundingClientRect().bottom || 80) + 14, bot = ($('bottom').getBoundingClientRect().top || H - 80) - 46 * UIZ();
+  const dir = new THREE.Vector3(0, 7.7, 4.7).normalize(), target = new THREE.Vector3(0, -.3, .3), v = new THREE.Vector3();
+  const place = d => { camera.position.copy(target).addScaledVector(dir, d); camera.lookAt(target); camera.updateMatrixWorld(); camera.updateProjectionMatrix(); };
+  const box = () => { let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; for (const p of BOARD_PTS){ v.copy(p).project(camera); const x = (v.x + 1) / 2 * W, y = (1 - v.y) / 2 * H; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } return {w:x1 - x0, h:y1 - y0, cy:(y0 + y1) / 2}; };
+  let lo = 3, hi = 40; for (let i = 0; i < 26; i++){ const m = (lo + hi) / 2; place(m); const b = box(); if (b.w <= W * .94 && b.h <= bot - top) hi = m; else lo = m; }
+  place(Math.max(hi, 5.5 + N * .45));
+  const b = box(); camera.setViewOffset(W, H, 0, b.cy - (top + bot) / 2, W, H); camera.updateProjectionMatrix();
+  camBase.copy(camera.position);
+}
+addEventListener('resize', resize);
+
+// ================= lights & backdrop =================
+const hemi = new THREE.HemisphereLight(L(0xbfc8ff), L(0x2a1050), .35); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 1.15); key.position.set(-4, 9, 5); key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024); Object.assign(key.shadow.camera, {left:-4, right:4, top:4, bottom:-4, near:1, far:25}); key.shadow.bias = -.0008; key.shadow.radius = 4;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xff4fd8, .55); rim.position.set(5, 3, -6); scene.add(rim);
+const fill = new THREE.PointLight(0x61e7ff, .6, 20); fill.position.set(0, 3, 4); scene.add(fill);
+const glowTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.4, 'rgba(255,255,255,.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+// nebula: big soft additive sprites far behind the board
+const nebula = [[0xff4fd8, -9, -14, 22], [0x3d6bff, 10, -18, 26], [0x2affc9, 2, -26, 30]].map(([col, x, z, s]) => {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:col, transparent:true, opacity:.12, blending:THREE.AdditiveBlending, depthWrite:false}));
+  sp.position.set(x, -6, z); sp.scale.setScalar(s); scene.add(sp); return sp; });
+{ const n = 500, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) pos.set([(Math.random() - .5) * 70, -8 - Math.random() * 6, (Math.random() - .5) * 70 - 10], i * 3);
+  const gm = new THREE.BufferGeometry(); gm.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(gm, new THREE.PointsMaterial({color:0xffffff, size:.09, transparent:true, opacity:.8}))); }
+
+// ================= zones: the atmosphere follows the biggest tile =================
+const ZONES = [
+  {at:0,    name:'DEEP SPACE', bg:0x07051a, neb:[0xff4fd8, 0x3d6bff, 0x2affc9], ground:0x2a1050, rim:0xff4fd8, fill:0x61e7ff, accent:0x7a5cff, tray:0x2a1f66},
+  {at:128,  name:'NEBULA',     bg:0x150420, neb:[0xff3d8b, 0xb026ff, 0xff8a3c], ground:0x3a0d3a, rim:0xff3d8b, fill:0xff8adf, accent:0xff3dbb, tray:0x3a1752},
+  {at:512,  name:'OCEAN',      bg:0x02101f, neb:[0x2ec4ff, 0x1d5bff, 0x2affc9], ground:0x062a3a, rim:0x2ec4ff, fill:0x7af0ff, accent:0x1aa8ff, tray:0x142a5a},
+  {at:1024, name:'AURORA',     bg:0x031612, neb:[0x2affc9, 0x5cff7a, 0x2e8bff], ground:0x08331f, rim:0x2affc9, fill:0xb2ff7a, accent:0x2affa0, tray:0x153a46},
+  {at:2048, name:'SOLAR',      bg:0x1a0a02, neb:[0xffd84a, 0xff7a1f, 0xff3d3d], ground:0x3a1a05, rim:0xffb21f, fill:0xffe7a0, accent:0xffb21f, tray:0x46280f},
+];
+let zoneIdx = -1;
+const zoneCur = {}; // live (lerped) colours
+for (const k of ['bg', 'ground', 'rim', 'fill', 'accent', 'tray']) zoneCur[k] = L(ZONES[0][k]);
+zoneCur.neb = ZONES[0].neb.map(L);
+function zoneFor(top){ let i = 0; ZONES.forEach((z, j) => { if (top >= z.at) i = j; }); return i; }
+function checkZone(announce){
+  const top = Math.max(2, ...tiles.filter(t => !t.dead).map(t => t.v)), i = zoneFor(top);
+  if (i === zoneIdx) return;
+  const up = i > zoneIdx; zoneIdx = i;
+  if (announce && up){ zoneBanner(ZONES[i].name); Sfx.zone(); }
+}
+function zoneBanner(name){
+  const el = document.createElement('div'); el.className = 'zone'; el.innerHTML = `<small>You reached</small>${name[0] + name.slice(1).toLowerCase().replace(/ (\w)/, (m, c) => ' ' + c.toUpperCase())}`;
+  document.body.appendChild(el); setTimeout(() => el.remove(), 2600);
+}
+function updateZone(dt){
+  const z = ZONES[Math.max(0, zoneIdx)], k = Math.min(1, dt * 1.2), tgt = new THREE.Color();
+  for (const key of ['bg', 'ground', 'rim', 'fill', 'accent', 'tray']) zoneCur[key].lerp(tgt.copy(L(z[key])), k);
+  zoneCur.neb.forEach((c, i) => c.lerp(tgt.copy(L(z.neb[i])), k));
+  scene.background.copy(zoneCur.bg);
+  hemi.groundColor.copy(zoneCur.ground); rim.color.copy(zoneCur.rim); fill.color.copy(zoneCur.fill);
+  underGlow.material.color.copy(zoneCur.accent); tray.material.color.copy(zoneCur.tray);
+  nebula.forEach((n, i) => n.material.color.copy(zoneCur.neb[i]));
+  motesMat.color.copy(zoneCur.accent).multiplyScalar(2.2);
+}
+// ambient motes drifting up around the board
+const MOTES = 160, mPos = new Float32Array(MOTES * 3), mSpd = new Float32Array(MOTES);
+for (let i = 0; i < MOTES; i++){ mPos.set([(Math.random() - .5) * 16, Math.random() * 8 - 4, (Math.random() - .5) * 14 - 2], i * 3); mSpd[i] = .15 + Math.random() * .35; }
+const mGeo = new THREE.BufferGeometry(); mGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+const motesMat = new THREE.PointsMaterial({map:glowTex, size:.16, transparent:true, opacity:.75, blending:THREE.AdditiveBlending, depthWrite:false});
+scene.add(new THREE.Points(mGeo, motesMat));
+function updateMotes(dt){
+  const sp = 1 + zoneIdx * .35;
+  for (let i = 0; i < MOTES; i++){ let y = mPos[i * 3 + 1] + mSpd[i] * dt * sp; if (y > 4) y = -4; mPos[i * 3 + 1] = y; mPos[i * 3] += Math.sin(now / 1400 + i) * dt * .08; }
+  mGeo.attributes.position.needsUpdate = true;
+}
+
+// ================= board =================
+const cellPos = (r, c) => new THREE.Vector3((c - (N - 1) / 2) * STEP, 0, (r - (N - 1) / 2) * STEP);
+const tray = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({color:L(0x2a1f66), roughness:.55, metalness:.3}));
+tray.position.y = -.3; tray.receiveShadow = true; scene.add(tray);
+const sockets = [];
+// soft glow spilling out from under the tray, tinted by the current zone
+const underGlow = new THREE.Mesh(new THREE.PlaneGeometry(11, 11), new THREE.MeshBasicMaterial({map:glowTex, color:L(0x7a5cff), transparent:true, opacity:.55, blending:THREE.AdditiveBlending, depthWrite:false}));
+underGlow.rotation.x = -Math.PI / 2; underGlow.position.y = -.58; scene.add(underGlow);
+const sockGeo = new THREE.RoundedBoxGeometry(1, .1, 1, 3, .12), sockMat = new THREE.MeshStandardMaterial({color:L(0x120c34), roughness:.85});
+function buildBoard(){
+  tray.geometry.dispose(); tray.geometry = new THREE.RoundedBoxGeometry(STEP * N + .34, .5, STEP * N + .34, 4, .18);
+  for (const m of sockets) scene.remove(m); sockets.length = 0;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++){ const m = new THREE.Mesh(sockGeo, sockMat); m.position.copy(cellPos(r, c)).setY(-.09); m.receiveShadow = true; scene.add(m); sockets.push(m); }
+  underGlow.scale.setScalar(N / 4);
+  key.shadow.camera.left = key.shadow.camera.bottom = -N; key.shadow.camera.right = key.shadow.camera.top = N; key.shadow.camera.updateProjectionMatrix();
+  resize();
+}
+
+// ================= tiles =================
+const H = .36;
+const tileGeo = new THREE.RoundedBoxGeometry(1, H, 1, 5, .14);
+const faceGeo = new THREE.PlaneGeometry(.92, .92); faceGeo.rotateX(-Math.PI / 2);
+const mats = {}, faces = {};
+function tileMat(v){
+  if (mats[v]) return mats[v];
+  const [c0] = colorOf(v), lvl = Math.log2(v);
+  const col = L(c0);
+  return mats[v] = new THREE.MeshStandardMaterial({color:col, roughness:.3, metalness:.1,
+    emissive:col, emissiveIntensity:v <= 4 ? .02 : Math.min(.55, .06 + lvl * .045)});
+}
+function faceMat(v){
+  if (faces[v]) return faces[v];
+  const c = document.createElement('canvas'); c.width = c.height = 512; const x = c.getContext('2d'); x.scale(2, 2);
+  const txt = String(v), fs = txt.length < 3 ? 128 : txt.length < 4 ? 104 : txt.length < 5 ? 82 : 64;
+  x.font = `${fs}px 'Russo One', system-ui, sans-serif`; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineJoin = 'round'; x.lineWidth = fs * .14; x.strokeStyle = 'rgba(10,6,40,.55)'; x.strokeText(txt, 128, 128 + fs * .06);
+  x.fillStyle = 'rgba(0,0,0,.35)'; x.fillText(txt, 128, 128 + fs * .07);
+  x.fillStyle = v <= 4 ? '#dbe2ff' : '#ffffff'; x.fillText(txt, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.anisotropy = renderer.capabilities.getMaxAnisotropy(); t.encoding = THREE.sRGBEncoding; // decoded to linear for the HDR target
+  return faces[v] = new THREE.MeshBasicMaterial({map:t, transparent:true, depthWrite:false, color:new THREE.Color(.92, .92, .92), toneMapped:false});
+}
+const rockMat = new THREE.MeshStandardMaterial({color:L(0x3b3550), roughness:.95, metalness:0});
+const rockFace = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  x.strokeStyle = 'rgba(255,255,255,.18)'; x.lineWidth = 6; x.lineCap = 'round';
+  x.lineWidth = 4; [[[22, 30], [50, 52], [44, 78], [70, 104]], [[50, 52], [84, 44], [104, 22]], [[84, 44], [96, 82]]].forEach(path => { x.beginPath(); path.forEach(([a, b], i) => i ? x.lineTo(a, b) : x.moveTo(a, b)); x.stroke(); });
+  const t = new THREE.CanvasTexture(c); return new THREE.MeshBasicMaterial({map:t, transparent:true, depthWrite:false}); })();
+function makeTileMesh(t){
+  const g = new THREE.Group();
+  if (t.rock){
+    const body = new THREE.Mesh(tileGeo, rockMat); body.position.y = H / 2; body.castShadow = true; body.receiveShadow = true; g.add(body);
+    const face = new THREE.Mesh(faceGeo, rockFace); face.position.y = H + .003; g.add(face);
+    g.userData = {body, face, shown:0}; scene.add(g); return g;
+  }
+  const body = new THREE.Mesh(tileGeo, tileMat(t.v)); body.position.y = H / 2; body.castShadow = true; body.receiveShadow = true; g.add(body);
+  const face = new THREE.Mesh(faceGeo, faceMat(t.v)); face.position.y = H + .003; g.add(face);
+  g.userData = {body, face, shown:t.v};
+  scene.add(g); return g;
+}
+function setShown(t, v){ if (t.mesh.userData.shown === v) return; t.mesh.userData.shown = v; t.mesh.userData.body.material = tileMat(v); t.mesh.userData.face.material = faceMat(v); }
+
+// ================= state =================
+let tiles = [], nextId = 1, score = 0, best = 0, won = false, over = false, keepGoing = false, history = [], sound = true, combo = 0, now = 0;
+let timeLeft = 0, merges = 0, cards = {bomb:0, swap:0}, target = null, startBest = 0, continued = false, milestone = 0, adOpen = false;
+// settings + per-mode bests/saved games. Old single-mode saves become the Classic save.
+let store = {sound:true, mode:'classic', best:{}, games:{}, seen:false};
+try { const s = JSON.parse(localStorage.getItem(SAVE) || 'null');
+  if (s && s.games) store = Object.assign(store, s);
+  else if (s){ store.sound = s.sound !== false; store.best.classic = s.best || 0; if (s.tiles && s.tiles.length) store.games.classic = {score:s.score || 0, won:!!s.won, keep:!!s.keep, tiles:s.tiles}; store.seen = true; }
+} catch(e){}
+sound = store.sound;
+const snapTiles = () => tiles.filter(t => !t.dead).map(({r, c, v, rock}) => rock ? {r, c, v:0, rock:true} : {r, c, v});
+const persist = () => { try {
+  store.sound = sound; store.mode = mode; store.best[mode] = best;
+  store.games[mode] = over ? null : {score, won, keep:keepGoing, tiles:snapTiles(), timeLeft, merges, cards};
+  localStorage.setItem(SAVE, JSON.stringify(store)); } catch(e){} };
+const at = (r, c) => tiles.find(t => !t.dead && t.r === r && t.c === c);
+function addTile(t){ t.mesh = makeTileMesh(t); if ($('home') && !$('home').hidden) t.mesh.visible = false; tiles.push(t); lastShadow = now; renderer.shadowMap.needsUpdate = true; return t; }
+function clearTiles(){ for (const t of tiles) scene.remove(t.mesh); tiles = []; }
+function freeCells(){ const f = []; for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (!at(r, c)) f.push([r, c]); return f; }
+function spawn(){
+  const free = freeCells(); if (!free.length) return;
+  const [r, c] = free[Math.floor(Math.random() * free.length)];
+  let v = Math.random() < .9 ? 2 : 4;
+  // big boards: once the top tile is large, some drops arrive pre-merged (8 past 512, 16 past 2048)
+  if (M.grow){ const top = Math.max(2, ...tiles.filter(t => !t.dead && !t.rock).map(t => t.v)), q = Math.random();
+    if (top >= 2048 && q < .12) v = 16; else if (top >= 512 && q < .15) v = 8; }
+  addTile({id:nextId++, r, c, fr:r, fc:c, v, born:now, pop:0});
+}
+function newGame(){
+  clearTiles(); score = 0; won = false; over = false; keepGoing = false; history = []; combo = 0;
+  timeLeft = M.timed || 0; merges = 0; cards = {bomb:M.power ? 1 : 0, swap:M.power ? 1 : 0}; setTarget(null); startBest = best; continued = false; milestone = 0;
+  // obstacle blocks go away from the corners so the board stays playable
+  if (M.rocks){ const inner = freeCells().filter(([r, c]) => !((r === 0 || r === N - 1) && (c === 0 || c === N - 1)));
+    for (let k = 0; k < M.rocks; k++){ const [r, c] = inner.splice(Math.floor(Math.random() * inner.length), 1)[0]; addTile({id:nextId++, r, c, fr:r, fc:c, v:0, rock:true, born:now, pop:0}); } }
+  spawn(); spawn(); persist(); updateHud(); $('overlay').hidden = true; $('undoBtn').disabled = true; checkZone(false);
+  for (const t of tiles) if (!t.rock) burst(t, 12, .7);
+}
+// switch mode: rebuild the board for its size and resume that mode's saved game
+function setMode(id, fresh){
+  mode = id; M = MODES[id]; N = M.size; clearTiles(); buildBoard();
+  best = store.best[id] || 0; shownScore = 0; startBest = best;
+  const g = !fresh && store.games[id];
+  if (g && g.tiles && g.tiles.length){
+    score = g.score || 0; won = !!g.won; keepGoing = !!g.keep; over = false; history = []; combo = 0;
+    timeLeft = g.timeLeft || M.timed || 0; merges = g.merges || 0; cards = g.cards || {bomb:0, swap:0}; setTarget(null);
+    for (const t of g.tiles) addTile({...t, id:nextId++, fr:t.r, fc:t.c, born:now, pop:0});
+    milestone = Math.max(0, ...g.tiles.map(t => t.v || 0));
+    $('overlay').hidden = true; $('undoBtn').disabled = true; updateHud(); checkZone(false);
+  } else newGame();
+  paintMode(); persist();
+}
+
+// ================= moves =================
+let animStart = -1, pendingMerges = [], lastGain = 0, nudgeT = -1e9, nudgeV = [0, 0];
+function move(dir){
+  if (over || adOpen || animStart >= 0 || !$('overlay').hidden || !$('modes').hidden || !$('home').hidden || target) return;
+  const dr = [-1, 0, 1, 0][dir], dc = [0, 1, 0, -1][dir];
+  const snap = {score, tiles:snapTiles(), cards:{...cards}, merges};
+  for (const t of tiles){ t.fr = t.r; t.fc = t.c; t.merged = false; }
+  const idx = [...Array(N).keys()], rows = dr > 0 ? [...idx].reverse() : idx, cols = dc > 0 ? [...idx].reverse() : idx;
+  let moved = false, gained = 0; const mergedNow = [];
+  for (const r of rows) for (const c of cols){
+    const t = at(r, c); if (!t || t.rock) continue;
+    let nr = r, nc = c;
+    while (true){
+      const rr = nr + dr, cc = nc + dc;
+      if (rr < 0 || rr >= N || cc < 0 || cc >= N) break;
+      const o = at(rr, cc);
+      if (!o){ nr = rr; nc = cc; continue; }
+      if (!o.rock && o.v === t.v && !o.merged && !t.merged){ nr = rr; nc = cc; o.dead = true; o.under = t; t.v *= 2; t.merged = true; gained += t.v; mergedNow.push(t); }
+      break;
+    }
+    if (nr !== r || nc !== c){ t.r = nr; t.c = nc; moved = true; }
+  }
+  if (!moved){ nudgeT = now; nudgeV = [dc, dr]; Sfx.bump(); return; }
+  history = [snap]; $('undoBtn').disabled = false;
+  score += gained; best = Math.max(best, score);
+  combo = mergedNow.length ? combo + 1 : 0;
+  animStart = now; pendingMerges = mergedNow; lastGain = gained; lastShadow = now;
+  Sfx.slide(); $('hint').style.opacity = 0;
+}
+function finishMove(){
+  animStart = -1;
+  if (swapping){ swapping = false; for (const t of tiles){ t.fr = t.r; t.fc = t.c; } persist(); return; }
+  for (const t of tiles) if (t.dead) scene.remove(t.mesh);
+  tiles = tiles.filter(t => !t.dead);
+  for (const t of tiles){ t.fr = t.r; t.fc = t.c; }
+  for (const t of pendingMerges){
+    t.pop = now; setShown(t, t.v);
+    const big = Math.log2(t.v);
+    burst(t, 16 + big * 4, .7 + big * .1); ring(t, big);
+    shake = Math.max(shake, Math.min(.35, .04 + big * .025));
+    flash(t);
+    Sfx.merge(t.v);
+    if (t.v >= M.goal && !won){ won = true; setTimeout(winFx, 250); if (PLATFORM.onWin) setTimeout(() => PLATFORM.onWin(t.v), 2600); }
+    else if (t.v >= 512 && t.v > milestone && PLATFORM.onMilestone){ const v = t.v; setTimeout(() => PLATFORM.onMilestone(v), 700); }
+    if (t.v >= 512) milestone = Math.max(milestone, t.v);
+    merges++; if (M.timed) timeLeft = Math.min(M.timed, timeLeft + .6 + Math.log2(t.v) * .15);
+    if (M.power && merges % 6 === 0) grantCard();
+  }
+  const mid = new THREE.Vector3(0, .6, -STEP * 2.4);
+  if (lastGain) floatText(`+${lastGain}`, mid, '#ffffff', 30);
+  if (pendingMerges.length >= 2) floatText(`Combo ×${pendingMerges.length}`, new THREE.Vector3(0, 1.2, 0), '#ffd84a', 46, true);
+  else if (combo >= 4) floatText(`${combo} in a row`, new THREE.Vector3(0, 1.2, 0), '#61e7ff', 40, true);
+  pendingMerges = [];
+  spawn(); updateHud(); persist(); checkZone(true);
+  if (!canMove() && !(M.power && (cards.bomb || cards.swap))){ endGame('No more moves'); }
+}
+function endGame(title){ over = true; setTarget(null); persist(); setTimeout(() => showOverlay(false, title), 500); Sfx.lose(); }
+function canMove(){
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++){
+    const t = at(r, c); if (!t) return true; if (t.rock) continue;
+    const rt = at(r, c + 1), dn = at(r + 1, c);
+    if ((rt && !rt.rock && rt.v === t.v) || (dn && !dn.rock && dn.v === t.v)) return true;
+  }
+  return false;
+}
+function undo(){
+  if (!history.length || animStart >= 0) return;
+  if (M.timed) return; // no undo against the clock
+  const s = history.pop(); score = s.score; over = false;
+  clearTiles(); for (const t of s.tiles) addTile({...t, id:nextId++, fr:t.r, fc:t.c, born:0, pop:0});
+  if (s.cards) cards = s.cards; if (s.merges !== undefined) merges = s.merges; paintCards();
+  $('undoBtn').disabled = true; $('overlay').hidden = true;
+  updateHud(); persist(); Sfx.undo(); checkZone(false);
+}
+
+// ================= VFX =================
+const PMAX = 900, pPos = new Float32Array(PMAX * 3), pCol = new Float32Array(PMAX * 3), parts = [];
+for (let i = 0; i < PMAX; i++) parts.push({life:0});
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3)); pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const points = new THREE.Points(pGeo, new THREE.PointsMaterial({size:.13, map:glowTex, vertexColors:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending}));
+points.frustumCulled = false; scene.add(points);
+let pNext = 0;
+function emit(p, n, col, spd, up = 1, grav = 9){
+  const c = L(col).multiplyScalar(3);
+  for (let i = 0; i < n; i++){
+    const q = parts[pNext]; pNext = (pNext + 1) % PMAX;
+    const a = Math.random() * Math.PI * 2, s = (Math.random() * .7 + .3) * spd;
+    Object.assign(q, {x:p.x, y:p.y, z:p.z, vx:Math.cos(a) * s, vy:(Math.random() * .8 + .4) * spd * up, vz:Math.sin(a) * s, life:1, decay:.9 + Math.random() * .9, r:c.r, g:c.g, b:c.b, grav});
+  }
+}
+function burst(t, n, spd){ const p = cellPos(t.r, t.c).setY(H + .1), col = t.rock ? '#8a7fb0' : colorOf(t.v)[0]; emit(p, Math.round(n * .7), col, spd * 3.2); emit(p, Math.round(n * .3), '#ffffff', spd * 2.4); }
+const rings = [], ringGeo = new THREE.RingGeometry(.92, 1, 48); ringGeo.rotateX(-Math.PI / 2);
+function ring(t, big){
+  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({color:L(colorOf(t.v)[0]).multiplyScalar(3), transparent:true, depthWrite:false, blending:THREE.AdditiveBlending}));
+  m.position.copy(cellPos(t.r, t.c)).setY(.03); scene.add(m); rings.push({m, life:1, max:.9 + big * .14});
+}
+const flashes = [];
+function flash(t){
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L(colorOf(t.v)[0]).multiplyScalar(2.5), transparent:true, blending:THREE.AdditiveBlending, depthWrite:false}));
+  sp.position.copy(cellPos(t.r, t.c)).setY(H + .2); scene.add(sp); flashes.push({sp, life:1});
+}
+let shake = 0;
+// floating DOM texts projected from 3D
+const fxLayer = $('fx'), texts = [], proj = new THREE.Vector3();
+function floatText(s, p, col, size, big){
+  const el = document.createElement('div'); el.className = 'ft'; el.textContent = s;
+  el.style.cssText += `;font-size:${size * UIZ()}px;color:${col};text-shadow:0 0 18px ${col},0 3px 0 rgba(0,0,0,.4)`;
+  fxLayer.appendChild(el); texts.push({el, p:p.clone(), life:1, big});
+}
+function winFx(){
+  Sfx.win();
+  for (let k = 0; k < 7; k++) setTimeout(() => {
+    const p = new THREE.Vector3((Math.random() - .5) * 3.5, 1.5 + Math.random(), (Math.random() - .5) * 3);
+    const col = ['#ffd84a', '#ff4fd8', '#61e7ff', '#8bff7a'][k % 4];
+    emit(p, 90, col, 4.5, .6, 4); shake = .3; Sfx.pop();
+  }, k * 260);
+  setTimeout(() => showOverlay(true), 2100);
+}
+
+// ================= frame =================
+const ease = k => 1 - Math.pow(1 - k, 3);
+function popScale(t){
+  if (t.born && now - t.born < POP_MS){ const k = (now - t.born) / POP_MS; return k < .7 ? ease(k / .7) * 1.08 : 1.08 - (k - .7) / .3 * .08; }
+  if (t.pop && now - t.pop < POP_MS){ const k = (now - t.pop) / POP_MS; return 1 + Math.sin(k * Math.PI) * .18; }
+  return 1;
+}
+const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+let last = 0;
+let perfAcc = 0, perfN = 0, perfHold = 0;
+function adaptResolution(rawDt){
+  if (document.visibilityState !== 'visible' || rawDt > .25) return;
+  perfAcc += rawDt; perfN++;
+  if (perfN < 40) return;
+  const avg = perfAcc / perfN; perfAcc = perfN = 0;
+  if (perfHold > 0){ perfHold--; return; }
+  let next = prNow;
+  if (avg > 1 / 55 && prNow > PR_MIN) next = Math.max(PR_MIN, prNow - .25);       // slower than ~50 fps: drop
+  else if (avg < 1 / 58 && prNow < PR_MAX) next = Math.min(PR_MAX, prNow + .25);  // steady 60: try sharper
+  if (next !== prNow){ prNow = next; resize(); perfHold = 2; }
+}
+function frame(ts){
+  requestAnimationFrame(frame);
+  const rawDt = (ts - (last || ts)) / 1000; adaptResolution(rawDt);
+  const dt = Math.min(.05, rawDt); last = ts; now = ts;
+  const k = animStart >= 0 ? Math.min(1, (now - animStart) / MOVE_MS) : 1, e = ease(k);
+  // bump on a blocked move
+  const nb = now - nudgeT < 170 ? Math.sin((now - nudgeT) / 170 * Math.PI) * .09 : 0;
+  for (const t of tiles){
+    const a = cellPos(t.fr, t.fc), b = cellPos(t.r, t.c);
+    t.mesh.position.lerpVectors(a, b, e); t.mesh.position.x += nudgeV[0] * nb; t.mesh.position.z += nudgeV[1] * nb;
+    const s = popScale(t), lift = t.pop && now - t.pop < POP_MS ? Math.sin((now - t.pop) / POP_MS * Math.PI) * .45 : 0;
+    t.mesh.scale.set(s, s, s); t.mesh.position.y = lift;
+    // tilt into the direction of travel while sliding
+    const moving = k < 1 && (t.fr !== t.r || t.fc !== t.c);
+    t.mesh.rotation.x = moving ? Math.sin(k * Math.PI) * .18 * Math.sign(t.r - t.fr) : 0;
+    t.mesh.rotation.z = moving ? -Math.sin(k * Math.PI) * .18 * Math.sign(t.c - t.fc) : 0;
+    if (t.merged && k < 1) setShown(t, t.v / 2);
+    if (t.dead){ t.mesh.position.y = -.02; }
+  }
+  if (animStart >= 0 && k >= 1) finishMove();
+  // particles
+  for (let i = 0; i < PMAX; i++){
+    const q = parts[i];
+    if (q.life > 0){
+      q.life -= q.decay * dt; q.vy -= q.grav * dt; q.x += q.vx * dt; q.y = Math.max(.02, q.y + q.vy * dt); q.z += q.vz * dt; q.vx *= .985; q.vz *= .985;
+      const f = Math.max(0, q.life); pPos[i * 3] = q.x; pPos[i * 3 + 1] = q.y; pPos[i * 3 + 2] = q.z; pCol[i * 3] = q.r * f; pCol[i * 3 + 1] = q.g * f; pCol[i * 3 + 2] = q.b * f;
+    } else pPos[i * 3 + 1] = -99;
+  }
+  pGeo.attributes.position.needsUpdate = true; pGeo.attributes.color.needsUpdate = true;
+  for (let i = rings.length - 1; i >= 0; i--){ const r = rings[i]; r.life -= dt * 2.4; const f = 1 - Math.max(0, r.life);
+    r.m.scale.setScalar(.35 + r.max * ease(f)); r.m.material.opacity = Math.max(0, r.life); if (r.life <= 0){ scene.remove(r.m); r.m.material.dispose(); rings.splice(i, 1); } }
+  for (let i = flashes.length - 1; i >= 0; i--){ const f = flashes[i]; f.life -= dt * 4; f.sp.scale.setScalar(1.2 + (1 - f.life) * 1.6); f.sp.material.opacity = Math.max(0, f.life);
+    if (f.life <= 0){ scene.remove(f.sp); f.sp.material.dispose(); flashes.splice(i, 1); } }
+  for (let i = texts.length - 1; i >= 0; i--){ const t = texts[i]; t.life -= dt * (t.big ? .9 : 1.4);
+    if (t.life <= 0){ t.el.remove(); texts.splice(i, 1); continue; }
+    proj.copy(t.p); proj.y += (1 - t.life) * (t.big ? .5 : .9); proj.project(camera);
+    const sc = t.big ? 1 + Math.sin(Math.min(1, (1 - t.life) * 4) * Math.PI / 2) * .15 : 1;
+    t.el.style.transform = `translate(${(proj.x + 1) / 2 * innerWidth}px,${(1 - proj.y) / 2 * innerHeight}px) translate(-50%,-50%) scale(${sc})`;
+    t.el.style.opacity = Math.min(1, t.life * 2); }
+  // ambience: zone colours, drifting nebula, motes
+  const tt = now / 1000; updateZone(dt); updateMotes(dt); updateTimer(dt);
+  if (target) for (const t of tiles) if (!t.dead && t !== target.first) t.mesh.position.y += Math.abs(Math.sin(tt * 6 + t.r + t.c)) * .06;
+  nebula.forEach((n, i) => { n.position.x += Math.sin(tt * .1 + i) * .003; n.material.opacity = .1 + Math.sin(tt * .4 + i * 2) * .03; });
+  // camera shake
+  camera.position.copy(camBase);
+  if (shake > 0){ camera.position.x += (Math.random() - .5) * shake; camera.position.z += (Math.random() - .5) * shake; shake *= .86; if (shake < .005) shake = 0; }
+  // tiles only cast shadows while something is moving or popping
+  if (animStart >= 0 || now - lastShadow < 600 || target){ renderer.shadowMap.needsUpdate = true; }
+  composer.render();
+}
+let lastShadow = 0;
+
+// ================= timer (Time Attack) =================
+function updateTimer(dt){
+  if (!M.timed){ return; }
+  if (!over && !adOpen && $('overlay').hidden && $('modes').hidden && $('home').hidden && animStart < 0 && document.visibilityState === 'visible'){
+    timeLeft = Math.max(0, timeLeft - dt);
+    if (timeLeft <= 0){ timeLeft = 0; endGame("Time's up"); }
+  }
+  const k = timeLeft / M.timed; $('timerFill').style.width = (k * 100) + '%';
+  const sec = Math.ceil(timeLeft); $('timerText').textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  $('timer').classList.toggle('low', timeLeft < 15); $('timerText').classList.toggle('low', timeLeft < 15);
+}
+
+// ================= power cards (Power Up) =================
+function grantCard(){
+  const k = Math.random() < .5 ? 'bomb' : 'swap'; if (cards[k] >= 3) return;
+  cards[k]++; paintCards(); floatText(k === 'bomb' ? '+1 bomb' : '+1 swap', new THREE.Vector3(0, 1.4, STEP * N / 2), '#ffd84a', 30, true); Sfx.zone();
+}
+function paintCards(){
+  $('powers').hidden = !M.power || !$('home').hidden; if (M.power) $('hint').style.opacity = 0;
+  $('bombN').textContent = cards.bomb; $('swapN').textContent = cards.swap;
+  $('bombBtn').disabled = !cards.bomb && target?.kind !== 'bomb'; $('swapBtn').disabled = !cards.swap && target?.kind !== 'swap';
+  $('bombBtn').classList.toggle('on', target?.kind === 'bomb'); $('swapBtn').classList.toggle('on', target?.kind === 'swap');
+}
+function setTarget(t){
+  target = t;
+  for (const x of tiles) x.mesh && x.mesh.userData.body && (x.mesh.userData.body.material.emissiveIntensity = x.mesh.userData.body.material.emissiveIntensity);
+  $('tip').hidden = !t; if (t) $('tip').textContent = t.kind === 'bomb' ? 'Tap a tile to remove it' : (t.first ? 'Now tap the tile to swap with' : 'Tap the first tile to swap');
+  paintCards();
+}
+function toggleCard(kind){
+  if (over || animStart >= 0) return;
+  if (target && target.kind === kind){ setTarget(null); return; }
+  if (!cards[kind]) return;
+  Sfx.unlock(); setTarget({kind}); Sfx.bump();
+}
+$('bombBtn').onclick = () => toggleCard('bomb');
+$('swapBtn').onclick = () => toggleCard('swap');
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pickTile(e){
+  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObjects(tiles.filter(t => !t.dead).map(t => t.mesh), true);
+  if (!hits.length) return null;
+  let o = hits[0].object; while (o.parent && !tiles.some(t => t.mesh === o)) o = o.parent;
+  return tiles.find(t => t.mesh === o) || null;
+}
+function usePower(t){
+  if (target.kind === 'bomb'){
+    cards.bomb--; history = []; $('undoBtn').disabled = true;
+    const p = cellPos(t.r, t.c).setY(H);
+    emit(p, 70, t.rock ? '#a99bd6' : colorOf(t.v)[0], 5, .8); emit(p, 30, '#ffd84a', 4); ring(t, 6); flash(t); shake = .35; Sfx.pop();
+    scene.remove(t.mesh); tiles = tiles.filter(x => x !== t); setTarget(null);
+  } else if (!target.first){ target.first = t; t.mesh.position.y = .3; setTarget(target); Sfx.bump(); return; }
+  else if (target.first === t){ setTarget(null); return; }
+  else {
+    const a = target.first; cards.swap--; history = []; $('undoBtn').disabled = true;
+    for (const x of [a, t]){ x.fr = x.r; x.fc = x.c; }
+    [a.r, t.r] = [t.r, a.r]; [a.c, t.c] = [t.c, a.c];
+    animStart = now; pendingMerges = []; lastGain = 0; swapping = true; setTarget(null); Sfx.slide();
+  }
+  persist(); paintCards();
+  if (!canMove() && !(cards.bomb || cards.swap)) endGame('No more moves');
+}
+let swapping = false;
+
+// ================= modes screen =================
+const glyph = (m, cls) => { const n = m.size, rocks = m.rocks ? [5, 10] : [];
+  return `<span class="${cls}" style="grid-template-columns:repeat(${n},1fr)">${Array.from({length:n * n}, (_, i) => `<i class="${rocks.includes(i) ? 'r' : ''}"></i>`).join('')}</span>`; };
+function paintMode(){
+  $('modeIcon').outerHTML = glyph(M, 'grid').replace('class="grid"', 'class="grid" id="modeIcon"'); $('modeName').textContent = M.name;
+  const playing = $('home').hidden; $('timer').hidden = $('timerText').hidden = !M.timed || !playing; paintCards(); $('undoBtn').hidden = !!M.timed;
+}
+function openModes(){
+  $('modeGrid').innerHTML = MODE_IDS.map((id, i) => { const m = MODES[id], g = store.games[id];
+    const saved = g && g.tiles && g.tiles.length;
+    return `<button class="mcard ${id === mode ? 'cur' : ''}" data-mode="${id}">
+      <span class="glyph">${m.icon ? m.icon : glyph(m, 'g')}</span>
+      <span><b>${m.name}</b><p>${m.desc}</p>${saved ? '<span class="resume">Game in progress</span>' : ''}</span>
+      <span class="bst"><small>Best</small>${(store.best[id] || 0).toLocaleString('en-US')}</span></button>`; }).join('');
+  $('modes').hidden = false; Sfx.bump();
+}
+$('modeGrid').addEventListener('click', e => { const b = e.target.closest('[data-mode]'); if (!b) return; Sfx.unlock(); persist(); $('modes').hidden = true; store.seen = true; setMode(b.dataset.mode); if ($('home').hidden){ paintMode(); } else { boardVisible(false); paintHome(); } Sfx.zone(); });
+$('modeChip').onclick = openModes;
+// ================= home =================
+// mini board per mode: a few coloured tiles so each card reads as that mode at a glance
+const DEMO = {classic:[[0,0,2],[1,2,8],[2,1,64],[3,3,512]], time:[[0,1,4],[1,3,16],[2,0,128],[3,2,32]], hard:[[0,0,8],[1,1,64],[2,2,256]],
+  big:[[0,0,2],[1,3,32],[2,1,256],[3,4,8],[4,2,1024]], huge:[[0,5,4],[1,1,64],[2,3,512],[4,0,16],[5,4,2048]], rocks:[[0,0,8],[2,3,128],[3,1,4]], power:[[0,2,16],[1,0,256],[3,3,64]]};
+const BADGE = {time:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2h5"/></svg>',
+  power:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="14" r="6.5"/><path d="M15.5 9.5 18 7"/><path d="M19 3v2M21 5h-2"/></svg>'};
+function miniBoard(id){
+  const m = MODES[id], n = m.size, cells = Array(n * n).fill(null);
+  (DEMO[id] || []).forEach(([r, c, v]) => { if (r < n && c < n) cells[r * n + c] = v; });
+  if (m.rocks) [n + 1, 2 * n + 2].forEach(i => cells[i] = 'r');
+  return `<div class="mini" style="grid-template-columns:repeat(${n},1fr)">${cells.map(v => v === 'r' ? '<i class="r"></i>' : v ? `<i style="background:${colorOf(v)[0]};font-size:${n > 4 ? 9 : 12}px">${v}</i>` : '<i></i>').join('')}${BADGE[id] ? `<span class="badge">${BADGE[id]}</span>` : ''}</div>`;
+}
+let shelfMode = 'classic';
+function buildShelf(){
+  $('shelf').innerHTML = MODE_IDS.map(id => { const m = MODES[id], g = store.games[id];
+    return `<button class="mcard2" data-mode="${id}">${miniBoard(id)}<b>${m.name}</b><p>${m.desc}</p>
+      <span class="meta"><span>Best<b>${(store.best[id] || 0).toLocaleString('en-US')}</b></span>${g && g.score > 0 ? '<em>In progress</em>' : ''}</span></button>`; }).join('');
+  $('dots').innerHTML = MODE_IDS.map(() => '<i></i>').join('');
+}
+function focusShelf(id, smooth){
+  shelfMode = id; const i = MODE_IDS.indexOf(id), card = $('shelf').children[i];
+  if (card) $('shelf').scrollTo({left:card.offsetLeft - ($('shelf').clientWidth - card.offsetWidth) / 2, behavior:smooth ? 'smooth' : 'auto'});
+  paintShelf();
+}
+function paintShelf(){
+  [...$('shelf').children].forEach(c => c.classList.toggle('on', c.dataset.mode === shelfMode));
+  [...$('dots').children].forEach((d, i) => d.classList.toggle('on', MODE_IDS[i] === shelfMode));
+  const g = store.games[shelfMode]; $('playBtn').textContent = g && g.score > 0 ? 'Continue' : 'Play';
+}
+let shelfT = 0;
+$('shelf').addEventListener('scroll', () => {
+  const sh = $('shelf'), mid = sh.scrollLeft + sh.clientWidth / 2;
+  let bestId = shelfMode, bd = 1e9; for (const c of sh.children){ const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd){ bd = d; bestId = c.dataset.mode; } }
+  if (bestId !== shelfMode){ shelfMode = bestId; paintShelf(); clearTimeout(shelfT); shelfT = setTimeout(() => Sfx.bump(), 60); }
+}, {passive:true});
+$('shelf').addEventListener('click', e => { const c = e.target.closest('[data-mode]'); if (!c) return; Sfx.unlock(); if (c.dataset.mode === shelfMode) startPlay(); else focusShelf(c.dataset.mode, true); });
+function paintHome(){ buildShelf(); $('homeSound').classList.toggle('off', !sound); requestAnimationFrame(() => focusShelf(mode, false)); }
+// the board stays out of the menu: only space and the zone colours behind it
+function boardVisible(on){ tray.visible = underGlow.visible = on; for (const m of sockets) m.visible = on; for (const t of tiles) t.mesh.visible = on; }
+function showHome(){ persist(); paintHome(); boardVisible(false); $('overlay').hidden = true; $('home').hidden = false; $('hud').hidden = $('bottom').hidden = true; $('hint').hidden = $('powers').hidden = true; $('timer').hidden = $('timerText').hidden = true; setTarget(null); }
+function startPlay(){
+  Sfx.unlock();
+  if (shelfMode !== mode) setMode(shelfMode);
+  boardVisible(true); $('home').hidden = true; $('hud').hidden = $('bottom').hidden = false; $('hint').hidden = false;
+  if (over) newGame(); paintMode(); Sfx.zone();
+}
+$('playBtn').onclick = startPlay;
+$('homeSound').onclick = () => { sound = !sound; paintSound(); $('homeSound').classList.toggle('off', !sound); persist(); Sfx.unlock(); };
+$('modesBtn').onclick = () => { Sfx.bump(); showHome(); };
+$('modesClose').onclick = () => { $('modes').hidden = true; store.seen = true; persist(); };
+$('ovModes').onclick = () => showHome();
+
+// ================= HUD / overlay =================
+let shownScore = 0;
+function updateHud(){
+  $('best').textContent = best.toLocaleString('en-US');
+  if (score !== shownScore){ const b = $('score'); b.classList.remove('bump'); void b.offsetWidth; b.classList.add('bump'); }
+  const el = $('score'), from = shownScore, to = score, t0 = performance.now();
+  const tick = () => { const k = Math.min(1, (performance.now() - t0) / 300); shownScore = Math.round(from + (to - from) * ease(k)); el.textContent = shownScore.toLocaleString('en-US'); if (k < 1) requestAnimationFrame(tick); };
+  tick();
+}
+function showOverlay(win, title){
+  const h = $('ovTitle'); h.textContent = win ? `You made ${M.goal}` : (title || 'No more moves'); h.className = win ? 'win' : 'lose';
+  $('stScore').textContent = score; $('stBest').textContent = best; $('stTop').textContent = Math.max(2, ...tiles.filter(t => !t.dead && !t.rock).map(t => t.v));
+  $('ovKeep').hidden = !win; $('overlay').hidden = false;
+  if (!win && PLATFORM.onGameOver) PLATFORM.onGameOver({score, best, mode, newBest:score > startBest && score > 0, continued});
+}
+// small API a platform wrapper can use; the web build never calls it
+window.NEON = {
+  // keep playing after a loss: the four smallest tiles are cleared (once per game)
+  continueGame(){
+    const small = tiles.filter(t => !t.dead && !t.rock).sort((a, b) => a.v - b.v).slice(0, 4);
+    for (const t of small){ burst(t, 18, .9); ring(t, 4); scene.remove(t.mesh); }
+    tiles = tiles.filter(t => !small.includes(t));
+    over = false; continued = true; if (M.timed) timeLeft = Math.max(timeLeft, 30);
+    $('overlay').hidden = true; shake = .25; Sfx.zone(); persist(); updateHud();
+  },
+  addCards(n){ cards.bomb += n; cards.swap += n; paintCards(); persist(); },
+  toast(msg){ floatText(msg, new THREE.Vector3(0, 1.4, 0), '#ffd84a', 26, true); },
+  get mode(){ return mode; }, get over(){ return over; },
+  set adOpen(v){ adOpen = !!v; },
+};
+$('ovKeep').onclick = () => { keepGoing = true; $('overlay').hidden = true; persist(); };
+$('ovNew').onclick = () => { Sfx.unlock(); newGame(); paintMode(); };
+$('newBtn').onclick = () => { Sfx.unlock(); newGame(); paintMode(); };
+$('undoBtn').onclick = undo;
+const paintSound = () => { $('soundBtn').classList.toggle('off', !sound); };
+$('soundBtn').onclick = () => { sound = !sound; paintSound(); persist(); Sfx.unlock(); };
+
+// ================= input =================
+addEventListener('keydown', e => {
+  const d = {ArrowUp:0, KeyW:0, ArrowRight:1, KeyD:1, ArrowDown:2, KeyS:2, ArrowLeft:3, KeyA:3}[e.code];
+  if (d !== undefined){ e.preventDefault(); Sfx.unlock(); move(d); }
+  if (e.code === 'KeyZ' && (e.metaKey || e.ctrlKey)) undo();
+});
+let sw = null;
+host.addEventListener('pointerdown', e => { Sfx.unlock(); if (target){ const t = pickTile(e); if (t && (target.kind === 'bomb' || !t.rock)) usePower(t); else if (!t) setTarget(null); return; } sw = {x:e.clientX, y:e.clientY}; });
+addEventListener('pointerup', e => {
+  if (!sw) return; const dx = e.clientX - sw.x, dy = e.clientY - sw.y; sw = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+  move(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 1 : 3) : (dy > 0 ? 2 : 0));
+});
+
+// ================= sound (synthesized) =================
+const Sfx = (() => {
+  let ac = null, out = null;
+  const unlock = () => { if (ac){ ac.resume && ac.resume(); return; } try { ac = new (window.AudioContext || window.webkitAudioContext)(); out = ac.createGain(); out.gain.value = .5; out.connect(ac.destination); } catch(e){} };
+  function tone(f0, f1, dur, type = 'sine', vol = .15, delay = 0){
+    if (!ac || !sound) return; const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), gn = ac.createGain(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .012); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(out); o.start(t); o.stop(t + dur + .03);
+  }
+  function noise(dur, vol, f){
+    if (!ac || !sound) return; const t = ac.currentTime, b = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), gn = ac.createGain(); s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = .8; gn.gain.value = vol;
+    s.connect(bp); bp.connect(gn); gn.connect(out); s.start(t);
+  }
+  const scale = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26, 28, 31];
+  return {unlock,
+    slide:() => noise(.09, .08, 1400),
+    merge:v => { const n = scale[Math.min(scale.length - 1, Math.log2(v) - 2)], f = 330 * Math.pow(2, n / 12); tone(f, f * 1.01, .22, 'triangle', .16); tone(f * 2, f * 2, .12, 'sine', .05, .02); if (v >= 256) tone(f * 1.5, f * 1.5, .3, 'sine', .07, .06); },
+    bump:() => tone(140, 90, .08, 'sine', .08),
+    undo:() => tone(520, 380, .12, 'triangle', .08),
+    pop:() => noise(.25, .2, 900),
+    zone:() => { [0, 7, 12, 19].forEach((n, i) => tone(262 * Math.pow(2, n / 12), 262 * Math.pow(2, n / 12), .8, 'sine', .07, i * .09)); noise(.9, .05, 500); },
+    lose:() => [0, 1, 2].forEach(i => tone(330 / (1 + i * .25), 200 / (1 + i * .25), .3, 'triangle', .1, i * .14)),
+    win:() => [0, 4, 7, 12, 16].forEach((n, i) => tone(392 * Math.pow(2, n / 12), 392 * Math.pow(2, n / 12), .35, 'triangle', .14, i * .1)),
+  };
+})();
+
+// ================= start (after the font, so tile numbers use it) =================
+paintSound();
+const splashT0 = performance.now();
+$('splashBar').style.width = '45%';
+function hideSplash(){
+  $('splashBar').style.width = '100%';
+  const wait = Math.max(0, 1400 - (performance.now() - splashT0));
+  setTimeout(() => { $('splash').classList.add('out'); setTimeout(() => $('splash').remove(), 550); }, wait);
+}
+const begin = () => {
+  $('splashBar').style.width = '80%';
+  setMode(MODES[store.mode] ? store.mode : 'classic');
+  store.seen = true; showHome();
+  requestAnimationFrame(frame); requestAnimationFrame(() => requestAnimationFrame(hideSplash));
+};
+(document.fonts && document.fonts.load ? Promise.all([document.fonts.load("100px 'Russo One'"), document.fonts.load("80px 'Neonderthaw'")]).catch(() => {}) : Promise.resolve()).then(begin);
+})();
+</script>
+<script>// Runs inside each game page, after the game's own code. It adds a way back to the arcade and turns finished rounds into XP.
+(() => {
+  const GAME = window.ARCADE_GAME, A = window.Arcade, P = window.PLATFORM || (window.PLATFORM = {});
+  if (!GAME || !A) return;
+  A.state.last = GAME; A.save();
+
+  // back to the arcade: a key in the game's own top bar, drawn in that game's own style
+  const top = document.getElementById('homeTop');
+  if (top){
+    // borrow the class of the game's own top-bar buttons ('key' in most games, 'chip' in Tightrope)
+    const own = top.querySelector('button'), cls = own && own.classList.contains('chip') ? 'chip' : 'key';
+    const b = document.createElement('button'); b.className = cls; b.id = 'arcadeBack'; b.setAttribute('aria-label', 'Back to all games');
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6"/></svg><span>Games</span>';
+    b.onclick = e => { e.stopPropagation(); location.href = '../index.html'; };
+    top.prepend(b);
+    // Tightrope's chips are light-on-dark: its icons are white, so the label is too
+    if (cls === 'chip') b.style.color = '#fff';
+  }
+  const css = document.createElement('style');
+  css.textContent = `#arcadeBack{margin-right:auto;display:inline-flex;align-items:center;gap:4px;padding:0 14px 0 8px!important;font-weight:700;font-size:15px}
+    #arcadeBack svg{width:20px;height:20px}
+    #homeTop{justify-content:flex-end}
+    .arcadeToast{position:fixed;left:50%;top:calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
+      font:700 14px/1.2 system-ui,-apple-system,sans-serif;color:#fff;animation:arcIn .35s cubic-bezier(.2,1.4,.4,1) both, arcOut .4s ease 3.4s forwards}
+    .arcadeToast b{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;background:rgba(20,18,40,.88);box-shadow:0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+    .arcadeToast b i{font-style:normal;color:#ffd23f}
+    .arcadeToast small{padding:6px 12px;border-radius:999px;background:rgba(62,224,197,.92);color:#0d2a26;font-weight:800;white-space:nowrap}
+    @keyframes arcIn{from{opacity:0;transform:translate(-50%,-14px) scale(.9)}}
+    @keyframes arcOut{to{opacity:0;transform:translate(-50%,-10px)}}`;
+  // no text selection, magnifier loupe or callout on a long press in any game (iOS shows them on plain text otherwise)
+  css.textContent += `*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}input,textarea{-webkit-user-select:text;user-select:text}`;
+  addEventListener('contextmenu', e => e.preventDefault()); document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+  document.head.appendChild(css);
+
+  // every finished round counts toward the player's arcade level and today's missions
+  const orig = P.onGameOver;
+  P.onGameOver = function(r){
+    let res = null; try { res = A.report(GAME, r); } catch(e){}
+    if (res) setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'arcadeToast';
+      t.innerHTML = `<b><i>+${res.gain} XP</i>${res.levelUp ? ` · Level ${res.levelUp}!` : ''}</b>` + res.done.map(d => `<small>✓ ${d}</small>`).join('');
+      document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+    }, 900);
+    return orig ? orig.apply(this, arguments) : undefined;
+  };
+})();
+</script>
+</body>
+</html>

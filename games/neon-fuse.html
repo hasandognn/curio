@@ -1,0 +1,933 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.ARCADE_GAME = "neon-fuse";
+// Curio: the shared layer every page loads (the hub and each game).
+// One save ('arcade-v1') holds the player's level, daily missions and streak; each game keeps its own save untouched.
+window.Arcade = (() => {
+  const KEY = 'arcade-v1';
+  const GAMES = [
+    {id:'neon-2048', name:'Neon 2048', blurb:'Slide and merge tiles of light', color:'#ff8a3d', cat:'puzzle'},
+    {id:'neon-blocks', name:'Neon Blocks', blurb:'Stack, clear and light up the well', color:'#ff4d8d', cat:'puzzle'},
+    {id:'neon-orbit', name:'Neon Orbit', blurb:'Turn the ring, fire, light up the core', color:'#ffd23f', cat:'reflex'},
+    {id:'neon-fuse', name:'Neon Fuse', blurb:'Turn the wires, keep the spark alive', color:'#3ee0c5', cat:'puzzle'},
+    {id:'neon-tilt', name:'Neon Tilt', blurb:'Tilt the board, roll every ball home', color:'#5aa9ff', cat:'puzzle'},
+    {id:'paper-echo', name:'Paper Echo', blurb:'Paper birds sing, you sing it back', color:'#f2b84b', cat:'calm'},
+    {id:'afterimage', name:'Afterimage', blurb:'Your past self is right behind you', color:'#8f7bff', cat:'reflex'},
+    {id:'halves', name:'Halves', blurb:'One swipe, two equal halves', color:'#ffd400', cat:'puzzle'},
+    {id:'tightrope', name:'Tightrope', blurb:'Keep your balance high above the city', color:'#ff6b5b', cat:'reflex'},
+    {id:'lily', name:'Lily', blurb:'A frog, a pond, a night of fireflies', color:'#e8c26a', cat:'reflex'},
+    {id:'steep', name:'Steep', blurb:'A little tea house, poured by hand', color:'#d9733f', cat:'calm'},
+    {id:'deckload', name:'Deckload', blurb:'Load her up, keep her level', color:'#e8a33a', cat:'physics'},
+    {id:'tidepool', name:'Tidepool', blurb:'Send the tide, settle every creature', color:'#3fb8c4', cat:'puzzle'},
+    {id:'kite', name:'Kite', blurb:'Ride the gusts, mind the line', color:'#ff7a59', cat:'reflex'},
+    {id:'neon-pour', name:'Neon Pour', blurb:'Pour the light, sort every colour', color:'#c86bff', cat:'puzzle'},
+    {id:'neon-bolts', name:'Neon Bolts', blurb:'Spin the nuts, light every bolt', color:'#3ee0c5', cat:'puzzle'},
+    {id:'pottery', name:'Pottery', blurb:'Throw it, fire it, put it on the shelf', color:'#d9733f', cat:'calm'},
+  ];
+  // shelf tabs, in the order they appear
+  const CATS = [{id:'puzzle', name:'Puzzle'}, {id:'reflex', name:'Reflex'}, {id:'calm', name:'Calm'}, {id:'physics', name:'Build'}];
+  const byId = Object.fromEntries(GAMES.map(g => [g.id, g]));
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const dayNum = s => Math.round(new Date(s + 'T12:00:00').getTime() / 864e5);
+
+  let S;
+  function load(){
+    try { S = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ S = null; }
+    S = Object.assign({xp:0, runs:{}, best:{}, played:0, streak:{last:'', days:0}, daily:null, last:null, noads:false, seen:false}, S || {});
+  }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+  load();
+
+  // levels: each one asks a little more than the last
+  const need = L => 100 + (L - 1) * 40;
+  function level(){ let L = 1, x = S.xp; while (x >= need(L)){ x -= need(L); L++; } return {level:L, into:x, need:need(L)}; }
+
+  // three missions a day, from three different games, the same for the whole day
+  function rng(seed){ let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function daily(){
+    const d = today();
+    if (S.daily && S.daily.date === d) return S.daily;
+    const R = rng(dayNum(d) * 7919), pool = GAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const list = pool.slice(0, 3).map((g, i) => {
+      const best = S.best[g.id] || 0, kind = i === 0 ? 'play' : best > 0 && R() < .6 ? 'score' : i === 2 ? 'best' : 'play';
+      if (kind === 'score') return {game:g.id, kind, target:Math.max(1, Math.round(best * (.45 + R() * .2))), prog:0, done:false};
+      if (kind === 'best') return {game:g.id, kind, target:1, prog:0, done:false};
+      return {game:g.id, kind:'play', target:2 + Math.floor(R() * 2), prog:0, done:false};
+    });
+    S.daily = {date:d, list, bonus:false}; save(); return S.daily;
+  }
+  const missionText = m => { const n = byId[m.game].name;
+    return m.kind === 'play' ? `Play ${m.target} rounds of ${n}` : m.kind === 'score' ? `Score ${m.target.toLocaleString('en-US')} in ${n}` : `Beat your best in ${n}`; };
+
+  // a finished round from any game: XP, missions, streak
+  function report(game, r){
+    r = r || {}; const score = +r.score || 0, newBest = !!r.newBest;
+    S.runs[game] = (S.runs[game] || 0) + 1; S.played++; S.last = game;
+    if (score > (S.best[game] || 0)) S.best[game] = score;
+    const before = level().level; let gain = 20 + (newBest ? 25 : 0); const done = [];
+    for (const m of daily().list){ if (m.done || m.game !== game) continue;
+      if (m.kind === 'play') m.prog++; else if (m.kind === 'score') m.prog = Math.max(m.prog, score); else if (newBest) m.prog = 1;
+      if (m.prog >= m.target){ m.done = true; gain += 100; done.push(missionText(m)); } }
+    if (!S.daily.bonus && S.daily.list.every(m => m.done)){ S.daily.bonus = true; gain += 150; done.push('All three missions'); }
+    // a day with at least one finished round keeps the streak going
+    const d = today(); if (S.streak.last !== d){ S.streak.days = S.streak.last && dayNum(d) - dayNum(S.streak.last) === 1 ? S.streak.days + 1 : 1; S.streak.last = d; }
+    S.xp += gain; save();
+    const after = level().level;
+    return {gain, done, levelUp:after > before ? after : 0};
+  }
+  const streak = () => { const d = today(); return S.streak.last && dayNum(d) - dayNum(S.streak.last) <= 1 ? S.streak.days : 0; };
+  return {GAMES, CATS, byId, get state(){ return S; }, level, daily, missionText, report, streak, save, reload:load};
+})();
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Neon Fuse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Sora:wght@400;500;600;700&family=Neonderthaw&display=swap" rel="stylesheet">
+<style>
+/* Same family as Neon 2048 and Neon Blocks: solid keycaps with a thick lower edge, no glass. The live wire is the loud thing. */
+:root{--night:#0e0a24;--panel:#1b1442;--key:#2b2163;--key-edge:#160f38;--orange:#ff8a3c;--orange-edge:#b4501a;--blue:#3a4888;--text:#efeaff;--dim:#a99fd6;
+  --num:'Russo One',system-ui,sans-serif;--ui:'Sora',system-ui,sans-serif;--st:var(--safe-top,env(safe-area-inset-top,0px));--sb:var(--safe-bottom,env(safe-area-inset-bottom,0px))}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--night);color:var(--text);font-family:var(--ui);user-select:none;-webkit-user-select:none;touch-action:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+#fx{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:3}
+.ft{position:absolute;left:0;top:0;font-family:var(--num);white-space:nowrap;transform:translate(-50%,-50%);will-change:transform,opacity}
+.ft small{display:block;text-align:center;font-family:var(--ui);font-weight:600;font-size:.42em;letter-spacing:.02em;opacity:.9}
+button{font:inherit;color:inherit;border:0;cursor:pointer;background:none;padding:0}
+button:focus-visible{outline:2px solid var(--orange);outline-offset:3px}
+
+/* top: pause, mode, best on one line; the big number and two small stats under it */
+#hud{position:fixed;left:0;right:0;top:calc(var(--st) + 10px);display:flex;justify-content:center;pointer-events:none;z-index:2}
+.bar{width:min(460px,calc(100vw - 24px));display:grid;gap:4px}
+.bar .top{display:flex;align-items:center;gap:10px}
+.bar .top .key{pointer-events:auto}
+#modeName{font-size:15px;font-weight:600;color:var(--dim)}
+.best{margin-left:auto;font-size:14px;font-weight:500;color:var(--dim)}
+.best b{font-family:var(--num);font-weight:400;color:var(--text);margin-left:4px}
+.scoreline{display:flex;align-items:flex-end;gap:12px}
+#score{font-family:var(--num);font-size:44px;line-height:1;letter-spacing:-.01em;font-variant-numeric:tabular-nums;text-shadow:0 4px 0 var(--key-edge)}
+#score.bump{animation:bump .28s}
+@keyframes bump{40%{transform:translateY(-3px)}}
+.stats2{margin-left:auto;display:flex;gap:16px}
+.stats2 span{display:grid;justify-items:end}
+.stats2 small{font-size:12px;color:var(--dim)}
+.stats2 b{font-family:var(--num);font-weight:400;font-size:22px;line-height:1.1;font-variant-numeric:tabular-nums}
+.stats2 b.low{color:var(--orange)}
+
+/* streak and spark speed sit under the board */
+.side{position:fixed;z-index:2;display:flex;align-items:center;gap:10px;height:48px;padding:0 14px;border-radius:14px;background:var(--panel);box-shadow:0 4px 0 var(--key-edge)}
+.side small{font-size:12px;font-weight:600;color:var(--dim)}
+.side b#streak{font-family:var(--num);font-weight:400;font-size:20px;color:#ffd84a}
+.tbar{display:block;width:90px;height:8px;border-radius:4px;background:#3a3170;overflow:hidden}
+.tbar i{display:block;height:100%;width:30%;background:#ffb84a;border-radius:4px;transition:width .3s}
+.tbar i.low{background:#ff3a4a}
+
+/* keycaps */
+.key{height:52px;min-width:52px;padding:0 16px;border-radius:14px;display:inline-grid;place-items:center;background:var(--key);box-shadow:0 5px 0 var(--key-edge);font-weight:600;font-size:15px;transition:transform .07s,box-shadow .07s}
+.key:active{transform:translateY(4px);box-shadow:0 1px 0 var(--key-edge)}
+.key:disabled{opacity:.35;pointer-events:none}
+.key svg{width:22px;height:22px;fill:none;stroke:var(--text);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.key.primary{background:var(--orange);box-shadow:0 5px 0 var(--orange-edge);color:#2a1100;font-family:var(--num);font-weight:400;font-size:18px;padding:0 28px}
+.key.primary:active{box-shadow:0 1px 0 var(--orange-edge)}
+.key.small{height:40px;min-width:40px;padding:0;border-radius:12px;box-shadow:0 4px 0 var(--key-edge)}
+.key.small svg{width:18px;height:18px}
+#soundBtn.off svg .wave,#homeSound.off svg .wave{display:none}#soundBtn svg .x,#homeSound svg .x{display:none}#soundBtn.off svg .x,#homeSound.off svg .x{display:inline}
+#hint{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 10px);z-index:2;text-align:center;font-size:13px;color:var(--dim);transition:opacity .6s;pointer-events:none}
+
+/* sheets: game over, pause, how to play. Solid panels, sentence case. */
+#overlay,#pause,#coach{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(8,5,22,.62);animation:fade .25s}
+@keyframes fade{from{opacity:0}}
+.card{width:min(460px,100%);background:var(--panel);border-radius:22px;padding:22px 20px 18px;display:grid;gap:16px;animation:up .3s cubic-bezier(.2,1.2,.4,1)}
+@keyframes up{from{transform:translateY(30px);opacity:0}}
+.card h2{margin:0;font-family:var(--num);font-weight:400;font-size:32px;line-height:1.05}
+.card h2.win{color:#ffd84a}
+.card .sub{margin:-10px 0 0;font-size:14px;color:var(--dim)}
+.card .sub.nb{color:#ffd84a;font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border-radius:14px;background:var(--night);padding:12px 4px}
+.stats div{text-align:center}
+.stats div + div{border-left:1px solid #2a2256}
+.stats small{display:block;font-size:12px;color:var(--dim)}
+.stats b{font-family:var(--num);font-weight:400;font-size:21px}
+.row{display:flex;gap:10px}.row .key{flex:1}
+.coach{display:grid;gap:10px}
+.coach div{display:grid;grid-template-columns:44px 1fr;gap:12px;align-items:center}
+.coach i{width:44px;height:44px;border-radius:12px;background:var(--night);display:grid;place-items:center}
+.coach i svg{width:24px;height:24px;fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.coach b{display:block;font-weight:600;font-size:15px}
+.coach p{margin:1px 0 0;font-size:13px;color:var(--dim)}
+.kbd{font-size:12px;color:var(--dim);text-align:center}
+
+/* banners */
+.zone{position:fixed;left:0;right:0;top:27%;z-index:3;text-align:center;font-family:var(--num);font-size:34px;pointer-events:none;color:#fff;text-shadow:0 4px 0 rgba(0,0,0,.35);animation:zone 2.6s ease forwards}
+.zone small{display:block;font-family:var(--ui);font-weight:500;font-size:14px;color:var(--dim);margin-bottom:6px}
+@keyframes zone{0%{opacity:0;transform:translateY(10px)}15%{opacity:1;transform:none}75%{opacity:1}100%{opacity:0;transform:translateY(-14px)}}
+
+#splash{position:fixed;inset:0;z-index:20;background:var(--night);display:grid;place-items:center;transition:opacity .5s ease,transform .5s ease}
+#splash.out{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .mark{display:grid;justify-items:center;gap:26px}
+#splash .bar{width:180px;height:6px;border-radius:3px;background:var(--panel);overflow:hidden;display:block}
+#splash .bar i{display:block;height:100%;width:0;border-radius:3px;background:var(--orange);transition:width .3s}
+/* logo: a neon-sign 'Neon' over FUSE spelled on four blocks */
+.logo2{display:grid;justify-items:center;gap:4px}
+.logo2 .tube{font-family:'Neonderthaw',cursive;font-size:84px;line-height:.9;color:#ffe6f7;
+  text-shadow:0 0 4px #fff,0 0 10px #ff4fd8,0 0 22px #ff4fd8,0 0 44px #ff2fb8;animation:flick 1.6s .4s both}
+@keyframes flick{0%,8%,12%,22%{opacity:.15;text-shadow:none}10%,20%,100%{opacity:1}}
+.logo2 .tiles{display:flex;gap:6px}
+.logo2 .tiles i{font-style:normal;width:58px;height:58px;border-radius:10px;display:grid;place-items:center;font-family:var(--num);font-size:30px;color:#fff;box-shadow:0 6px 0 rgba(0,0,0,.4),inset 0 2px 0 rgba(255,255,255,.35);text-shadow:0 3px 0 rgba(0,0,0,.25)}
+.logo2 .tiles i:nth-child(1){background:#2ec4ff;transform:translateY(5px)}
+.logo2 .tiles i:nth-child(2){background:#b45cff}
+.logo2 .tiles i:nth-child(3){background:#ff8a3c;transform:translateY(3px)}
+.logo2 .tiles i:nth-child(4){background:#ffd84a;color:#4a2400}
+.logo2 .tiles i:nth-child(5){background:#3dffa0;color:#053a22;transform:translateY(4px)}
+.logo2 .tiles i:nth-child(6){background:#ff3d5e;transform:translateY(-2px)}
+.logo2.small .tube{font-size:62px}
+.logo2.small .tiles i{width:46px;height:46px;font-size:26px;border-radius:10px}
+#splash .logo2 .tiles i{opacity:0;animation:tileIn .45s cubic-bezier(.3,1.5,.5,1) forwards}
+@keyframes tileIn{from{opacity:0;translate:0 -40px}to{opacity:1;translate:0 0}}
+#splash .logo2 .tiles i:nth-child(2){animation-delay:.08s}#splash .logo2 .tiles i:nth-child(3){animation-delay:.16s}#splash .logo2 .tiles i:nth-child(4){animation-delay:.24s}#splash .logo2 .tiles i:nth-child(5){animation-delay:.32s}#splash .logo2 .tiles i:nth-child(6){animation-delay:.4s}
+
+/* home: space keeps drifting behind; wordmark up top, the mode shelf and the play key at thumb height */
+#home{position:fixed;inset:0;z-index:4;display:grid;grid-template-rows:auto auto 1fr auto;padding:calc(var(--st) + 10px) 0 calc(var(--sb) + 22px);background:radial-gradient(120% 70% at 50% 35%,rgba(14,10,36,0),rgba(14,10,36,.55))}
+#homeTop{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:0 16px;min-height:44px}
+#homeTop .key{height:42px;min-width:42px;padding:0 10px;border-radius:12px}
+#homeTop .key svg{width:20px;height:20px}
+#home .word{justify-self:center;text-align:center;margin-top:8px}
+#home .word small{display:block;font-family:var(--ui);font-weight:500;font-size:15px;color:var(--dim);margin-top:20px}
+#shelf{align-self:center;display:flex;gap:14px;overflow-x:auto;scroll-snap-type:x mandatory;padding:18px calc(50vw - 115px) 22px;scrollbar-width:none;touch-action:pan-x}
+#shelf::-webkit-scrollbar{display:none}
+.mcard2{flex:0 0 230px;scroll-snap-align:center;border-radius:22px;padding:16px;background:var(--panel);box-shadow:0 6px 0 var(--key-edge);text-align:left;display:grid;gap:10px;transition:transform .25s,opacity .25s;opacity:.55;transform:scale(.92)}
+.mcard2.on{opacity:1;transform:none}
+.mcard2 .mini{position:relative;border-radius:14px;background:var(--night);padding:8px}
+.mcard2 .mini canvas{display:block;width:78%;margin:0 auto}
+.mcard2 .mini .badge{position:absolute;right:-6px;top:-6px;width:38px;height:38px;border-radius:12px;background:var(--orange);color:#2a1100;display:grid;place-items:center;box-shadow:0 4px 0 var(--orange-edge)}
+.mcard2 .mini .badge svg{width:22px;height:22px}
+.mcard2 b{font-weight:600;font-size:19px}
+.mcard2 p{margin:-6px 0 0;font-size:13px;color:var(--dim);line-height:1.35;min-height:36px}
+.mcard2 .meta{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--dim)}
+.mcard2 .meta span b{font-family:var(--num);font-weight:400;font-size:17px;color:var(--text);margin-left:4px}
+.mcard2 .meta em{font-style:normal;color:var(--orange);font-weight:600}
+#dots{display:flex;justify-content:center;gap:7px;margin-top:-6px}
+#dots i{width:7px;height:7px;border-radius:4px;background:#3a3170;transition:width .2s,background .2s}
+#dots i.on{width:20px;background:var(--orange)}
+#home .bottomset{width:min(420px,calc(100% - 32px));justify-self:center;display:grid;gap:14px}
+#playBtn{height:64px;font-size:24px;width:100%}
+@media (max-height:700px){
+  #home .word{margin-top:0}#home .word small{display:none}
+  #home .logo2 .tube{font-size:58px}#home .logo2 .tiles i{width:38px;height:38px;font-size:22px;border-radius:9px}
+  #shelf{padding:10px calc(50vw - 90px) 14px}.mcard2{flex-basis:180px;padding:12px;gap:8px}.mcard2 p{display:none}.mcard2 b{font-size:16px}
+  #playBtn{height:54px;font-size:20px}
+  #score{font-size:36px}.stats2 b{font-size:19px}
+}
+@media (max-height:520px){ #home .logo2 .tiles{display:none} .mcard2{flex-basis:150px} #shelf{padding:6px calc(50vw - 75px) 10px} }
+/* ===== tablets: iPad portrait and landscape, Split View / Stage Manager windows from 600x700 up. Phones never match these
+   queries (--z stays 1), so their layout is untouched. Each UI layer is laid out in a smaller virtual box (its real size / --z)
+   and scaled up by --z, so keys, cards and text grow together; the playfield canvas keeps full resolution and resize() frames it. */
+:root{--z:1}
+@media (min-width:600px) and (min-height:800px){:root{--z:1.15}}
+@media (min-width:740px) and (min-height:900px){:root{--z:1.25}}
+@media (min-width:800px) and (min-height:1100px){:root{--z:1.35}}
+@media (min-width:1000px) and (min-height:1300px){:root{--z:1.5}}
+@media (min-width:900px) and (min-height:700px) and (orientation:landscape){:root{--z:1.1}}
+@media (min-width:1200px) and (min-height:950px) and (orientation:landscape){:root{--z:1.3}}
+@media (min-width:600px) and (min-height:700px){
+  #home,#overlay,#pause,#coach,#iosSheet{right:auto;bottom:auto;width:calc(100% / var(--z));height:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #hud{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 0}
+  #hint{right:auto;width:calc(100% / var(--z));transform:scale(var(--z));transform-origin:0 100%}
+  #streakBox{transform:scale(var(--z));transform-origin:0 0}#speedBox{transform:scale(var(--z));transform-origin:100% 0}
+  #overlay,#pause,#coach,#iosSheet{place-items:center}
+  #shelf{padding-left:calc(50% - 115px);padding-right:calc(50% - 115px)}
+  .zone{font-size:calc(34px * var(--z))}.zone small{font-size:calc(14px * var(--z))}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition-duration:.01s!important}}
+</style>
+</head>
+<body>
+<div id="splash" role="status" aria-label="Loading"><div class="mark">
+  <div class="logo2 small"><span class="tube">Neon</span><span class="tiles"><i>F</i><i>U</i><i>S</i><i>E</i></span></div>
+  <span class="bar"><i id="splashBar"></i></span>
+</div></div>
+<div id="stage"></div>
+<div id="home" hidden>
+  <div id="homeTop">
+    <button class="key" id="homeSound" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+  </div>
+  <div class="word"><div class="logo2"><span class="tube">Neon</span><span class="tiles"><i>F</i><i>U</i><i>S</i><i>E</i></span></div><small>Turn the wires, keep the spark alive</small></div>
+  <div style="display:grid;align-content:center"><div id="shelf"></div><div id="dots"></div></div>
+  <div class="bottomset"><button class="key primary" id="playBtn">Play</button></div>
+</div>
+<div id="hud"><div class="bar">
+  <div class="top">
+    <button class="key small" id="pauseBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg></button>
+    <span id="modeName">Classic</span>
+    <span class="best">Best<b id="best">0</b></span>
+  </div>
+  <div class="scoreline"><span id="score">0</span><span class="stats2"><span id="sA"><small>Level</small><b>1</b></span><span id="sB"><small>Wires</small><b>0</b></span></span></div>
+</div></div>
+<div class="side" id="streakBox"><small>Streak</small><b id="streak">×1</b></div>
+<div class="side" id="speedBox"><small>Speed</small><b class="tbar"><i id="speedFill"></i></b></div>
+<div id="fx"></div>
+<div id="hint">Tap a wire to turn it</div>
+<div id="pause" hidden><div class="card">
+  <h2>Paused</h2>
+  <div class="stats" id="pStats"></div>
+  <div class="row"><button class="key" id="pRestart">Restart</button><button class="key primary" id="pResume">Resume</button></div>
+  <div class="row"><button class="key" id="pHome">Main menu</button><button class="key" id="pHelp">Controls</button>
+    <button class="key" id="soundBtn" aria-label="Sound" style="flex:0 0 52px"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button></div>
+</div></div>
+<div id="coach" hidden><div class="card">
+  <h2>How to play</h2>
+  <div class="coach">
+    <div><i><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg></i><span><b>Tap a wire to turn it</b><p>Each tap turns it a quarter, clockwise.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></i><span><b>Keep the spark moving</b><p>It burns along connected wire. The glowing outline shows where it goes next.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg></i><span><b>Crossings go straight</b><p>One wire bridges over the other, so the current never turns there. Burn through both for a bonus; bulbs score extra too.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="m9 9 6 6M15 9l-6 6"/></svg></i><span><b>Dead ends fizzle</b><p>If the wire runs out you get a moment to fix it. Burnt wire grows back.</p></span></div>
+  </div>
+  <div class="kbd">Mouse: click a wire to turn it. P pauses.</div>
+  <button class="key primary" id="coachOk">Got it</button>
+</div></div>
+<div id="overlay" hidden><div class="card">
+  <h2 id="ovTitle">Fizzled out</h2>
+  <p class="sub" id="ovSub"></p>
+  <div class="stats" id="ovStats"></div>
+  <div class="row"><button class="key primary" id="ovNew">New game</button></div>
+  <div class="row" id="ovRow2"><button class="key" id="ovModes">Main menu</button></div>
+</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/RoundedBoxGeometry.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>window.PLATFORM = {name:'web'};
+</script>
+<script>
+(() => {
+'use strict';
+const SAVE = 'neon-fuse-v1';
+const COLS = 6, ROWS = 8, STEP = 1.08, HALF = STEP / 2, TUBE_R = .075;
+const MODES = {
+  classic:{name:'Classic', desc:'Endless. The spark speeds up as it burns. One dead end and it fizzles.', grace:1.4, speed0:.6, accel:.012, vmax:2.6, refresh:3.2},
+  rush:   {name:'Rush',    desc:'Two minutes, a faster spark. A dead end costs ten seconds.', grace:1, speed0:1, accel:.01, vmax:3, refresh:2.6, timed:120, penalty:10},
+  zen:    {name:'Zen',     desc:'A slow spark that waits at dead ends for as long as you need.', grace:Infinity, speed0:.6, accel:0, vmax:.6, refresh:3.5, zen:true},
+};
+const MODE_IDS = Object.keys(MODES);
+let mode = 'classic', M = MODES.classic;
+const PLATFORM = window.PLATFORM || {name:'web'};
+const $ = id => document.getElementById(id);
+const UIZ = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--z')) || 1;   // tablet UI scale (1 on phones)
+const L_ = h => new THREE.Color(h).convertSRGBToLinear();
+// directions: 0 north (away from the camera), 1 east, 2 south, 3 west
+const DR = [-1, 0, 1, 0], DC = [0, 1, 0, -1];
+const BASE = {S:[0, 2], C:[0, 1], X:[0, 1, 2, 3]};
+const opens = t => BASE[t.t].map(d => (d + t.rot) % 4);
+const axisOf = d => d % 2;   // 0 = north-south, 1 = east-west
+
+// ================= renderer, camera, post =================
+const host = $('stage');
+const MOBILE = matchMedia('(pointer:coarse)').matches;
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
+const PR_MAX = Math.min(devicePixelRatio || 1, MOBILE ? 2.5 : 2), PR_MIN = Math.min(devicePixelRatio || 1, 1.25);
+let prNow = Math.min(PR_MAX, 2);
+renderer.setPixelRatio(prNow); renderer.toneMapping = THREE.NoToneMapping;
+host.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = L_(0x07051a);
+const camera = new THREE.PerspectiveCamera(34, 1, .3, 300);
+const camBase = new THREE.Vector3();
+const RTO = {format:THREE.RGBAFormat, type:THREE.HalfFloatType};
+const rt = renderer.capabilities.isWebGL2 ? Object.assign(new THREE.WebGLMultisampleRenderTarget(16, 16, RTO), {samples:MOBILE ? 2 : 4}) : new THREE.WebGLRenderTarget(16, 16, RTO);
+const composer = new THREE.EffectComposer(renderer, rt);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(256, 256), .5, .38, 1.15);
+composer.addPass(bloom);
+const bloomSetSize = bloom.setSize.bind(bloom); bloom.setSize = (w, h) => bloomSetSize(Math.round(w / 2), Math.round(h / 2));
+composer.addPass(new THREE.ShaderPass({
+  uniforms:{tDiffuse:{value:null}},
+  vertexShader:'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:`uniform sampler2D tDiffuse; varying vec2 vUv;
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
+    void main(){ vec3 c = aces(texture2D(tDiffuse, vUv).rgb * .92);
+      float l = dot(c, vec3(.2126, .7152, .0722)); c = clamp(mix(vec3(l), c, 1.3), 0., 1.);
+      c = mix(c * 12.92, 1.055 * pow(c, vec3(1. / 2.4)) - .055, step(.0031308, c));
+      vec2 d = vUv - .5; c *= 1. - dot(d, d) * .5; gl_FragColor = vec4(c, 1.); }`}));
+const cellPos = (r, c) => new THREE.Vector3((c - (COLS - 1) / 2) * STEP, 0, (r - (ROWS - 1) / 2) * STEP);
+const sideVec = d => new THREE.Vector3(DC[d] * HALF, 0, DR[d] * HALF);
+const FIT_PTS = [];
+for (const x of [-1, 1]) for (const z of [-1, 1]) for (const y of [-.4, .5]) FIT_PTS.push(new THREE.Vector3(x * (COLS * STEP / 2 + .3), y, z * (ROWS * STEP / 2 + .3) + (z > 0 ? .9 : 0)));
+function resize(){
+  const W = innerWidth, Hh = innerHeight;
+  renderer.setPixelRatio(prNow); renderer.setSize(W, Hh); composer.setPixelRatio(prNow); composer.setSize(W, Hh);
+  camera.aspect = W / Hh; camera.clearViewOffset();
+  const sb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sb')) || 0;
+  const z = UIZ(), top = ($('hud').getBoundingClientRect().bottom || 100) + 8, bot = Hh - sb - 92 * z;
+  const dir = new THREE.Vector3(0, 8.2, 4.4).normalize(), target = new THREE.Vector3(0, 0, .3), v = new THREE.Vector3();
+  const place = d => { camera.position.copy(target).addScaledVector(dir, d); camera.lookAt(target); camera.updateMatrixWorld(); camera.updateProjectionMatrix(); };
+  const box = () => { let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; for (const p of FIT_PTS){ v.copy(p).project(camera); const x = (v.x + 1) / 2 * W, y = (1 - v.y) / 2 * Hh; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } return {w:x1 - x0, h:y1 - y0, cy:(y0 + y1) / 2}; };
+  let lo = 3, hi = 200; for (let i = 0; i < 30; i++){ const m = (lo + hi) / 2; place(m); const b = box(); if (b.w <= W * .96 && b.h <= bot - top) hi = m; else lo = m; }
+  place(hi);
+  const b = box(); camera.setViewOffset(W, Hh, 0, b.cy - (top + bot) / 2, W, Hh); camera.updateProjectionMatrix();
+  camBase.copy(camera.position);
+  const barW = Math.min(460 * z, W - 24), edge = (W - barW) / 2 + 'px', y = (Hh - sb - 80 * z) + 'px';
+  Object.assign($('streakBox').style, {left:edge, top:y}); Object.assign($('speedBox').style, {right:edge, top:y});
+}
+addEventListener('resize', resize);
+
+// ================= lights & backdrop =================
+const hemi = new THREE.HemisphereLight(L_(0xbfc8ff), L_(0x2a1050), .45); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, .9); key.position.set(-4, 10, 6); scene.add(key);
+const rim = new THREE.DirectionalLight(0xff4fd8, .45); rim.position.set(5, 4, -7); scene.add(rim);
+const sparkLight = new THREE.PointLight(0xffb84a, 0, 5, 2); scene.add(sparkLight);
+const glowTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.4, 'rgba(255,255,255,.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+const nebula = [[0xff4fd8, -12, -6, -26, 30], [0x3d6bff, 13, -8, -30, 34], [0x2affc9, 2, -10, -40, 40]].map(([col, x, y, z, s]) => {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:col, transparent:true, opacity:.12, blending:THREE.AdditiveBlending, depthWrite:false}));
+  sp.position.set(x, y, z); sp.scale.setScalar(s); scene.add(sp); return sp; });
+{ const n = 600, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) pos.set([(Math.random() - .5) * 90, -10 - Math.random() * 8, (Math.random() - .5) * 90 - 10], i * 3);
+  const gm = new THREE.BufferGeometry(); gm.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(gm, new THREE.PointsMaterial({color:0xffffff, size:.12, transparent:true, opacity:.8}))); }
+
+// ================= zones =================
+const ZONES = [
+  {name:'Deep space', bg:0x07051a, neb:[0xff4fd8, 0x3d6bff, 0x2affc9], ground:0x2a1050, rim:0xff4fd8, accent:0x7a5cff, tray:0x221a58, fire:0xffb84a},
+  {name:'Nebula',     bg:0x150420, neb:[0xff3d8b, 0xb026ff, 0xff8a3c], ground:0x3a0d3a, rim:0xff3d8b, accent:0xff3dbb, tray:0x33144c, fire:0xff6ad5},
+  {name:'Ocean',      bg:0x02101f, neb:[0x2ec4ff, 0x1d5bff, 0x2affc9], ground:0x062a3a, rim:0x2ec4ff, accent:0x1aa8ff, tray:0x122650, fire:0x61e7ff},
+  {name:'Aurora',     bg:0x031612, neb:[0x2affc9, 0x5cff7a, 0x2e8bff], ground:0x08331f, rim:0x2affc9, accent:0x2affa0, tray:0x13343f, fire:0x8bff6a},
+  {name:'Solar',      bg:0x1a0a02, neb:[0xffd84a, 0xff7a1f, 0xff3d3d], ground:0x3a1a05, rim:0xffb21f, accent:0xffb21f, tray:0x40240d, fire:0xffe36a},
+];
+let zoneIdx = -1;
+const zoneCur = {};
+for (const k of ['bg', 'ground', 'rim', 'accent', 'tray', 'fire']) zoneCur[k] = L_(ZONES[0][k]);
+zoneCur.neb = ZONES[0].neb.map(L_);
+const zoneNow = () => M.timed ? Math.min(4, Math.floor((1 - timeLeft / M.timed) * 5)) : level >= 12 ? 4 : level >= 9 ? 3 : level >= 6 ? 2 : level >= 3 ? 1 : 0;
+function checkZone(announce){ const i = zoneNow(); if (i === zoneIdx) return; const up = i > zoneIdx; zoneIdx = i; if (announce && up){ banner('You reached', ZONES[i].name); Sfx.zone(); } }
+function banner(small, big){ const el = document.createElement('div'); el.className = 'zone'; el.innerHTML = `<small>${small}</small>${big}`; document.body.appendChild(el); setTimeout(() => el.remove(), 2600); }
+function updateZone(dt){
+  const z = ZONES[Math.max(0, zoneIdx)], k = Math.min(1, dt * 1.2), tgt = new THREE.Color();
+  for (const key of ['bg', 'ground', 'rim', 'accent', 'tray', 'fire']) zoneCur[key].lerp(tgt.copy(L_(z[key])), k);
+  zoneCur.neb.forEach((c, i) => c.lerp(tgt.copy(L_(z.neb[i])), k));
+  scene.background.copy(zoneCur.bg); hemi.groundColor.copy(zoneCur.ground); rim.color.copy(zoneCur.rim);
+  trayMat.color.copy(zoneCur.tray); underGlow.material.color.copy(zoneCur.accent);
+  nebula.forEach((n, i) => n.material.color.copy(zoneCur.neb[i])); motesMat.color.copy(zoneCur.accent).multiplyScalar(2.2);
+  CUR.uCol.value.copy(zoneCur.fire).multiplyScalar(2.4); sparkMat.color.copy(zoneCur.fire).multiplyScalar(4); sparkLight.color.copy(zoneCur.fire);
+}
+const MOTES = 140, mPos = new Float32Array(MOTES * 3), mSpd = new Float32Array(MOTES);
+for (let i = 0; i < MOTES; i++){ mPos.set([(Math.random() - .5) * 26, Math.random() * 8 - 4, (Math.random() - .5) * 22 - 3], i * 3); mSpd[i] = .15 + Math.random() * .35; }
+const mGeo = new THREE.BufferGeometry(); mGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+const motesMat = new THREE.PointsMaterial({map:glowTex, size:.2, transparent:true, opacity:.75, blending:THREE.AdditiveBlending, depthWrite:false});
+scene.add(new THREE.Points(mGeo, motesMat));
+function updateMotes(dt){ const sp = 1 + zoneIdx * .35;
+  for (let i = 0; i < MOTES; i++){ let y = mPos[i * 3 + 1] + mSpd[i] * dt * sp; if (y > 4) y = -4; mPos[i * 3 + 1] = y; mPos[i * 3] += Math.sin(now / 1400 + i) * dt * .08; }
+  mGeo.attributes.position.needsUpdate = true; }
+
+// ================= board =================
+const trayMat = new THREE.MeshStandardMaterial({color:L_(0x221a58), roughness:.55, metalness:.3});
+const tray = new THREE.Mesh(new THREE.RoundedBoxGeometry(COLS * STEP + .4, .45, ROWS * STEP + .4, 4, .18), trayMat); tray.position.y = -.32; scene.add(tray);
+const underGlow = new THREE.Mesh(new THREE.PlaneGeometry(16, 18), new THREE.MeshBasicMaterial({map:glowTex, color:L_(0x7a5cff), transparent:true, opacity:.5, blending:THREE.AdditiveBlending, depthWrite:false}));
+underGlow.rotation.x = -Math.PI / 2; underGlow.position.y = -.6; scene.add(underGlow);
+// the source: a socket under the bottom edge that the spark leaves from
+const source = new THREE.Mesh(new THREE.CylinderGeometry(.32, .38, .3, 32), new THREE.MeshStandardMaterial({color:L_(0x2b2163), emissive:L_(0xffb84a), emissiveIntensity:.6, roughness:.3, metalness:.4}));
+scene.add(source);
+const tileGeo = new THREE.RoundedBoxGeometry(.98, .2, .98, 3, .08);
+const tileMat = new THREE.MeshStandardMaterial({color:L_(0x1a1340), roughness:.25, metalness:.25});
+const wireMat = new THREE.MeshStandardMaterial({color:L_(0x4a3f8a), emissive:L_(0x5a4cc0), emissiveIntensity:.35, roughness:.35, metalness:.3});
+const burntMat = new THREE.MeshStandardMaterial({color:L_(0x1c1630), roughness:.9});
+// live wire: energy bands race along the tube and the surface crackles; burnt trails reuse it with a fade
+const CUR = {uTime:{value:0}, uCol:{value:new THREE.Color(3, 2, 1)}};
+const currentMat = (fade = 1) => new THREE.ShaderMaterial({
+  uniforms:{uTime:CUR.uTime, uCol:CUR.uCol, uFade:{value:fade}},
+  vertexShader:'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:`uniform float uTime, uFade; uniform vec3 uCol; varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main(){
+      float band = pow(.5 + .5 * sin(vUv.x * 46. - uTime * 22.), 8.);
+      float crackle = h(floor(vec2(vUv.x * 70., vUv.y * 6.)) + floor(uTime * 24.));
+      vec3 c = uCol * (.45 + band * 1.8 + step(.86, crackle) * 1.2);
+      gl_FragColor = vec4(c * uFade, 1.); }`});
+const bulbMat = new THREE.MeshStandardMaterial({color:L_(0xffe36a), emissive:L_(0xffe36a), emissiveIntensity:.5, roughness:.2});
+// crossings are two separate straight wires: the east-west one arches over the other like a bridge,
+// so it is obvious the current goes straight through and never turns there
+const BRIDGE_Y = .55;
+const curveFor = (from, to, bridge) => new THREE.QuadraticBezierCurve3(sideVec(from), new THREE.Vector3(0, bridge ? BRIDGE_Y - .14 : 0, 0), sideVec(to));
+// the unrotated wire shapes; a tile's group turns to set its rotation
+const WIRE = {};
+for (const [t, pairs] of Object.entries({S:[[0, 2]], C:[[0, 1]], X:[[0, 2], [1, 3]]}))
+  WIRE[t] = pairs.map(([a, b], i) => { const g = new THREE.TubeGeometry(curveFor(a, b, t === 'X' && i === 1), 20, TUBE_R, 10); g.translate(0, .14, 0); return g; });
+const capGeo = new THREE.CylinderGeometry(TUBE_R * 1.5, TUBE_R * 1.5, .06, 16);
+const bulbGeo = new THREE.SphereGeometry(.13, 20, 12);
+let grid = [];
+function makeTile(t, rot, bulb){
+  const g = new THREE.Group(), tile = {t, rot, bulb, used:[false, false], burnt:0, g, wires:[], born:now, vis:rot};
+  g.add(new THREE.Mesh(tileGeo, tileMat));
+  WIRE[t].forEach(geo => { const m = new THREE.Mesh(geo, wireMat); g.add(m); tile.wires.push(m); });
+  if (bulb){ const b = new THREE.Mesh(bulbGeo, bulbMat.clone()); b.position.y = .3; g.add(b); tile.bulbMesh = b; }
+  g.rotation.y = -rot * Math.PI / 2; scene.add(g); return tile;
+}
+function randomTile(){ const q = Math.random(); const t = q < .5 ? 'C' : q < .86 ? 'S' : 'X'; return makeTile(t, Math.floor(Math.random() * 4), t !== 'X' && Math.random() < .1); }
+function setTile(r, c, tile){ const old = grid[r] && grid[r][c]; if (old){ scene.remove(old.g); } tile.g.position.copy(cellPos(r, c)); grid[r][c] = tile; tile.r = r; tile.c = c; }
+// a wire is spent when the spark has used it; crossings have two separate wires
+const usable = (tile, from) => !tile.burnt && opens(tile).includes(from) && !(tile.t === 'X' ? tile.used[axisOf((from - tile.rot + 4) % 4)] : tile.used[0]);
+function exitOf(tile, from){ const o = opens(tile); if (tile.t === 'X') return (from + 2) % 4; return o.find(d => d !== from); }
+
+// ================= state =================
+let score = 0, wires = 0, streak = 0, level = 1, speed = 0, timeLeft = 0, elapsed = 0, bestStreak = 0;
+let spark = null;   // {r, c, from, to, t, curve, lit}
+let phase = 'ready', phaseT = 0, stallT = 0, over = false, paused = false, adOpen = false, continued = false, startBest = 0, overT = 0, now = 0, shake = 0, sound = true;
+let store = {sound:true, mode:'classic', best:{}, games:{}, seen:false};
+try { const s = JSON.parse(localStorage.getItem(SAVE) || 'null'); if (s && s.games) store = Object.assign(store, s); } catch(e){}
+sound = store.sound !== false;
+function persist(){ try {
+  store.sound = sound; store.mode = mode;
+  store.games[mode] = over || !grid.length ? null : {grid:grid.map(row => row.map(t => t.t + t.rot + (t.bulb ? 'b' : ''))), score, wires, streak, level, timeLeft, elapsed, continued};
+  localStorage.setItem(SAVE, JSON.stringify(store)); } catch(e){} }
+const bestOf = id => store.best[id] || 0;
+
+// ================= the spark =================
+const sparkMat = new THREE.SpriteMaterial({map:glowTex, color:new THREE.Color(4, 3, 1), transparent:true, blending:THREE.AdditiveBlending, depthWrite:false});
+const sparkSprite = new THREE.Sprite(sparkMat); sparkSprite.scale.setScalar(.5); scene.add(sparkSprite);
+const hintRing = new THREE.Mesh(new THREE.RingGeometry(.5, .56, 4, 1, Math.PI / 4), new THREE.MeshBasicMaterial({transparent:true, blending:THREE.AdditiveBlending, depthWrite:false}));
+hintRing.rotation.x = -Math.PI / 2; hintRing.scale.setScalar(1.36); scene.add(hintRing);
+const startCol = Math.floor(COLS / 2) - 1;
+function launch(){
+  // the spark always leaves the source into the bottom row; that tile is reset to a straight wire so the start is fair
+  const r = ROWS - 1, c = startCol; setTile(r, c, makeTile('S', 0, false));
+  source.position.copy(cellPos(r, c)).add(new THREE.Vector3(0, -.05, HALF + .45));
+  spark = null; phase = 'ready'; phaseT = 0; stallT = 0;
+  sparkSprite.position.copy(source.position).setY(.35);
+  paveAhead(r, c, 0, 4);
+}
+// lay a few connected wires ahead of the start so the first seconds are about reading the board, not panic
+function paveAhead(r, c, dir, n){
+  for (let i = 0; i < n; i++){
+    const nr = r + DR[dir], nc = c + DC[dir]; if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return;
+    const from = (dir + 2) % 4, choices = [dir, (dir + 1) % 4, (dir + 3) % 4].filter(d => { const rr = nr + DR[d], cc = nc + DC[d]; return rr >= 0 && rr < ROWS - 1 && cc >= 0 && cc < COLS; });
+    const out = choices[Math.random() < .5 ? 0 : Math.floor(Math.random() * choices.length)];
+    const t = (out + 2) % 4 === from ? 'S' : 'C';
+    let rot = 0; for (; rot < 4; rot++){ const o = BASE[t].map(d => (d + rot) % 4); if (o.includes(from) && o.includes(out)) break; }
+    const tile = makeTile(t, rot, false); tile.born = now + i * 90; setTile(nr, nc, tile);
+    r = nr; c = nc; dir = out;
+  }
+}
+function enter(r, c, from){
+  const tile = grid[r][c], to = exitOf(tile, from);
+  const bridge = tile.t === 'X' && axisOf((from - tile.rot + 4) % 4) === 1;
+  const curve = new THREE.QuadraticBezierCurve3(cellPos(r, c).add(sideVec(from)).setY(.14), cellPos(r, c).setY(bridge ? BRIDGE_Y : .14), cellPos(r, c).add(sideVec(to)).setY(.14));
+  const geo = new THREE.TubeGeometry(curve, 24, TUBE_R * 1.25, 10); geo.setDrawRange(0, 0);
+  const lit = new THREE.Mesh(geo, currentMat()); scene.add(lit);
+  spark = {r, c, from, to, t:0, curve, lit, tile};
+  phase = 'run'; stallT = 0;
+}
+// where the spark will go once it leaves its tile; null = off the board
+function nextCell(){ if (!spark) return {r:ROWS - 1, c:startCol, from:2}; const r = spark.r + DR[spark.to], c = spark.c + DC[spark.to]; if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null; return {r, c, from:(spark.to + 2) % 4}; }
+function leaveTile(){
+  const tile = spark.tile, wi = tile.t === 'X' ? axisOf((spark.from - tile.rot + 4) % 4) : 0;
+  tile.used[wi] = true; tile.wires[wi].material = burntMat;
+  const crossed = tile.t === 'X' && tile.used[0] && tile.used[1];
+  if (tile.t !== 'X' || crossed) tile.burnt = now;
+  trails.push({m:spark.lit, life:1});
+  wires++; streak++; bestStreak = Math.max(bestStreak, streak);
+  const mult = 1 + Math.floor(streak / 10); let gain = 10 * mult;
+  const p = cellPos(spark.r, spark.c).setY(.6);
+  if (crossed){ gain += 100 * mult; floatText('Crossing', p, '#61e7ff', 30, true, '+' + (100 * mult)); Sfx.cross(); burst(p, 8, '#61e7ff', .9); }
+  if (tile.bulb){ gain += 50 * mult; tile.bulb = false; floatText('Bulb', p, '#ffe36a', 28, true, '+' + (50 * mult)); Sfx.bulb(); burst(p, 7, '#ffe36a', .8); speed = Math.max(M.speed0, speed - .12);
+    const b = tile.bulbMesh; b.material.emissiveIntensity = 4; setTimeout(() => tile.g.remove(b), 300); }
+  score += gain; speed = Math.min(M.vmax, speed + M.accel);
+  if (streak % 10 === 0){ floatText(`Streak ×${mult + (streak % 10 === 0 ? 0 : 0)}`, new THREE.Vector3(0, 1.2, 0), '#ffd84a', 34, true); Sfx.streak(); }
+  const lv = 1 + Math.floor(wires / 25); if (lv > level){ level = lv; levelUp(); }
+  paintStats();
+}
+function levelUp(){
+  banner('Level', String(level)); Sfx.zone(); checkZone(true);
+  if (level % 5 === 0 && PLATFORM.onMilestone){ const v = level; setTimeout(() => PLATFORM.onMilestone(v), 900); }
+  if (M.zen && level % 5 === 0 && PLATFORM.onHappy) setTimeout(() => PLATFORM.onHappy(level), 900);
+}
+function fizzle(){
+  const p = sparkSprite.position.clone(); burst(p, 12, '#ff4a5a', 1.4, .5); burst(p, 5, '#ffffff', .8, .3); shake = .45; Sfx.fizzle();
+  spark = null;
+  if (M.penalty){ timeLeft = Math.max(0, timeLeft - M.penalty); streak = 0; floatText(`−${M.penalty} s`, new THREE.Vector3(0, 1, 0), '#ff6a7a', 40, true); launch(); paintStats(); return; }
+  endGame('Fizzled out');
+}
+
+// ================= game flow =================
+function clearGrid(){ for (const row of grid) for (const t of row) scene.remove(t.g); grid = []; }
+function newGame(){
+  clearGrid(); for (const t of trails) scene.remove(t.m); trails.length = 0;
+  grid = Array.from({length:ROWS}, () => Array(COLS).fill(null));
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++){ const t = randomTile(); t.born = now + (r + c) * 40; setTile(r, c, t); }
+  score = 0; wires = 0; streak = 0; level = 1; speed = M.speed0; elapsed = 0; timeLeft = M.timed || 0; bestStreak = 0;
+  over = false; paused = false; continued = false; startBest = bestOf(mode);
+  launch(); zoneIdx = -1; checkZone(false);
+  $('overlay').hidden = $('pause').hidden = true; paintMode(); paintStats(); persist();
+}
+function setMode(id, fresh){
+  mode = id; M = MODES[id];
+  const g = !fresh && store.games[id];
+  if (g && g.grid){
+    clearGrid(); for (const t of trails) scene.remove(t.m); trails.length = 0;
+    grid = Array.from({length:ROWS}, () => Array(COLS).fill(null));
+    g.grid.forEach((row, r) => row.forEach((s, c) => setTile(r, c, makeTile(s[0], +s[1], s[2] === 'b'))));
+    ({score, wires, streak, level, timeLeft, elapsed} = g); continued = !!g.continued; speed = Math.min(M.vmax, M.speed0 + wires * M.accel);
+    over = false; paused = false; startBest = bestOf(id); launch(); zoneIdx = -1; checkZone(false);
+    $('overlay').hidden = $('pause').hidden = true; paintMode(); paintStats();
+  } else newGame();
+  persist();
+}
+function endGame(title){ over = true; overT = now; phase = 'over'; Sfx.lose(); persist(); setTimeout(() => showOverlay(title), 1100); }
+const playing = () => !over && !paused && !adOpen && $('home').hidden && $('overlay').hidden && $('pause').hidden && $('coach').hidden && document.visibilityState === 'visible';
+
+function update(dt){
+  if (!playing() || !grid.length) return;
+  elapsed += dt;
+  if (M.timed){ timeLeft -= dt; if (timeLeft <= 0){ timeLeft = 0; paintStats(); endGame("Time's up"); return; } }
+  // burnt wire grows back after a while
+  for (const row of grid) for (const t of row) if (t.burnt && now - t.burnt > M.refresh * 1000 && !(spark && spark.tile === t)){ const n = randomTile(); n.born = now; setTile(t.r, t.c, n); }
+  phaseT += dt;
+  if (phase === 'ready'){ if (phaseT > 2.4){ const n = nextCell(); enter(n.r, n.c, n.from); Sfx.ignite(); } return; }
+  if (phase === 'run'){
+    spark.t += speed * dt;
+    if (spark.t >= 1){ spark.t = 1; leaveTile(); phase = 'stall'; stallT = 0; }
+  }
+  if (phase === 'stall'){
+    const n = nextCell();
+    if (n && usable(grid[n.r][n.c], n.from)){ const carry = 0; enter(n.r, n.c, n.from); spark.t = carry; return; }
+    stallT += dt;
+    if (stallT > .05 && Math.floor(stallT * 8) !== Math.floor((stallT - dt) * 8)) Sfx.sizzle();
+    if (stallT >= M.grace) fizzle();
+  }
+}
+
+// ================= input: tap a wire to turn it =================
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pickTile(x, y){
+  ndc.set(x / innerWidth * 2 - 1, -(y / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObjects(grid.flat().map(t => t.g), true); if (!hits.length) return null;
+  let o = hits[0].object; while (o.parent && o.parent !== scene) o = o.parent; return grid.flat().find(t => t.g === o) || null;
+}
+function turn(tile){
+  if (!tile) return;
+  if (spark && spark.tile === tile && phase === 'run'){ Sfx.bump(); tile.nudge = now; return; }   // live wire: hands off
+  if (tile.burnt){ Sfx.bump(); tile.nudge = now; return; }
+  tile.rot = (tile.rot + 1) % 4; Sfx.turn(); hideHint();
+}
+let tp = null;
+host.addEventListener('pointerdown', e => { Sfx.unlock(); if (!playing()) return; tp = {x:e.clientX, y:e.clientY, t:performance.now()}; });
+addEventListener('pointerup', e => { if (!tp) return; const t = tp; tp = null; if (!playing()) return; if (Math.hypot(e.clientX - t.x, e.clientY - t.y) < 14) turn(pickTile(e.clientX, e.clientY)); });
+addEventListener('keydown', e => { if (e.code === 'KeyP' || e.code === 'Escape'){ e.preventDefault(); if (paused) resumeGame(); else pauseGame(); } });
+let hintGone = false;
+function hideHint(){ if (hintGone) return; hintGone = true; $('hint').style.opacity = 0; }
+
+// ================= VFX =================
+// lightning: jagged ribbons lying over the board, redrawn every frame so they flicker
+const ARCS = 40, ASEG = 9, AV = (ASEG + 1) * 2, aPos = new Float32Array(ARCS * AV * 3), aCol = new Float32Array(ARCS * AV * 3), aIdx = [];
+for (let k = 0; k < ARCS; k++) for (let i = 0; i < ASEG; i++){ const o = k * AV + i * 2; aIdx.push(o, o + 1, o + 2, o + 1, o + 3, o + 2); }
+const aGeo = new THREE.BufferGeometry(); aGeo.setAttribute('position', new THREE.BufferAttribute(aPos, 3)); aGeo.setAttribute('color', new THREE.BufferAttribute(aCol, 3)); aGeo.setIndex(aIdx);
+const arcMesh = new THREE.Mesh(aGeo, new THREE.MeshBasicMaterial({vertexColors:true, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide}));
+arcMesh.frustumCulled = false; scene.add(arcMesh);
+const arcs = []; let aNext = 0;
+for (let k = 0; k < ARCS; k++) arcs.push({life:0});
+function zap(a, b, life, w, col, jit = .12){
+  const q = arcs[aNext]; aNext = (aNext + 1) % ARCS;
+  Object.assign(q, {a:a.clone(), b:b.clone(), life:1, decay:1 / life, w, jit, col:(col instanceof THREE.Color ? col.clone() : L_(col)).multiplyScalar(3)});
+}
+// a burst of bolts out from a point
+function burst(p, n, col, len, life = .35){ for (let i = 0; i < n; i++){ const a = Math.random() * Math.PI * 2, l = len * (.5 + Math.random() * .6);
+  zap(p, new THREE.Vector3(p.x + Math.cos(a) * l, p.y + Math.random() * .3, p.z + Math.sin(a) * l), life, .05, col, .18); } }
+const _d = new THREE.Vector3(), _n = new THREE.Vector3(), _p = new THREE.Vector3();
+function drawArcs(dt){
+  for (let k = 0; k < ARCS; k++){ const q = arcs[k], o = k * AV * 3;
+    if (q.life <= 0){ aCol.fill(0, o, o + AV * 3); continue; }
+    q.life -= q.decay * dt; const f = Math.max(0, q.life);
+    _d.subVectors(q.b, q.a); const len = _d.length(); _n.set(-_d.z, 0, _d.x).normalize();
+    for (let i = 0; i <= ASEG; i++){ const t = i / ASEG, env = Math.sin(t * Math.PI);
+      _p.copy(q.a).addScaledVector(_d, t).addScaledVector(_n, (Math.random() - .5) * 2 * q.jit * env * Math.max(.4, len)); _p.y += (Math.random() - .5) * q.jit * env;
+      const w = q.w * (.4 + .6 * env) * (.5 + .5 * f);
+      for (const [j, sgn] of [[0, -1], [1, 1]]){ const v = o + (i * 2 + j) * 3; aPos[v] = _p.x + _n.x * w * sgn; aPos[v + 1] = _p.y; aPos[v + 2] = _p.z + _n.z * w * sgn;
+        aCol[v] = q.col.r * f; aCol[v + 1] = q.col.g * f; aCol[v + 2] = q.col.b * f; } } }
+  aGeo.attributes.position.needsUpdate = true; aGeo.attributes.color.needsUpdate = true;
+}
+const trails = [];
+const fxLayer = $('fx'), texts = [], proj = new THREE.Vector3();
+function floatText(s, p, col, size, big, sub){
+  const el = document.createElement('div'); el.className = 'ft'; el.textContent = s;
+  if (sub){ const sm = document.createElement('small'); sm.textContent = sub; el.appendChild(sm); }
+  el.style.cssText += `;font-size:${size * UIZ()}px;color:${col};text-shadow:0 0 18px ${col},0 3px 0 rgba(0,0,0,.4)`;
+  fxLayer.appendChild(el); texts.push({el, p:p.clone(), life:1, big});
+}
+
+// ================= frame =================
+const ease = k => 1 - Math.pow(1 - k, 3);
+let last = 0, perfAcc = 0, perfN = 0, perfHold = 0;
+function adaptResolution(rawDt){
+  if (document.visibilityState !== 'visible' || rawDt > .25) return;
+  perfAcc += rawDt; perfN++; if (perfN < 40) return;
+  const avg = perfAcc / perfN; perfAcc = perfN = 0; if (perfHold > 0){ perfHold--; return; }
+  let nx = prNow; if (avg > 1 / 55 && prNow > PR_MIN) nx = Math.max(PR_MIN, prNow - .25); else if (avg < 1 / 58 && prNow < PR_MAX) nx = Math.min(PR_MAX, prNow + .25);
+  if (nx !== prNow){ prNow = nx; resize(); perfHold = 2; }
+}
+function frame(ts){
+  requestAnimationFrame(frame);
+  const rawDt = (ts - (last || ts)) / 1000; adaptResolution(rawDt);
+  const dt = Math.min(.05, rawDt); last = ts; now = ts;
+  update(dt);
+  // tiles: turn smoothly to their rotation, pop in when new, sink a little when burnt
+  for (const row of grid) for (const t of row){
+    const target = t.rot; let d = target - t.vis; if (d < -2) d += 4; t.vis += d * Math.min(1, dt * 22); if (Math.abs(d) < .002) t.vis = target; if (t.vis >= 4) t.vis -= 4;
+    t.g.rotation.y = -t.vis * Math.PI / 2;
+    const age = now - t.born, s = age < 0 ? .01 : age < 260 ? ease(age / 260) : 1; t.g.scale.setScalar(Math.max(.01, s));
+    const nudge = t.nudge && now - t.nudge < 200 ? Math.sin((now - t.nudge) / 200 * Math.PI * 3) * .06 : 0;
+    t.g.position.x = cellPos(t.r, t.c).x + nudge; t.g.position.y = t.burnt ? -.06 : 0;
+    if (t.bulbMesh) t.bulbMesh.material.emissiveIntensity = Math.max(.5, t.bulbMesh.material.emissiveIntensity - dt * 6) + Math.sin(now / 300 + t.r) * .1;
+  }
+  // the spark: light the wire behind it, throw sparks
+  const sp = sparkSprite.position;
+  if (spark && (phase === 'run' || phase === 'stall')){
+    const k = Math.min(1, spark.t); spark.curve.getPoint(k, sp); sp.y = .3;
+    const total = spark.lit.geometry.index.count; spark.lit.geometry.setDrawRange(0, Math.floor(total * k / 60) * 60);
+    // the head of the current: two or three short bolts licking forward, red and wild when it is stuck
+    const stuck = phase === 'stall', heads = stuck ? 3 : 2;
+    for (let i = 0; i < heads; i++){ const a = Math.random() * Math.PI * 2, l = (stuck ? .35 : .22) + Math.random() * .25;
+      zap(sp, new THREE.Vector3(sp.x + Math.cos(a) * l, .2 + Math.random() * .2, sp.z + Math.sin(a) * l), .07, stuck ? .035 : .028, stuck ? '#ff4a5a' : zoneCur.fire, .25); }
+    if (stuck && Math.random() < .25){ const n2 = nextCell(); const tgt = n2 ? cellPos(n2.r, n2.c).setY(.2) : sp.clone().add(sideVec(spark.to).multiplyScalar(1.4)); zap(sp, tgt, .12, .04, '#ff4a5a', .2); }
+  }
+  sparkSprite.visible = !over && grid.length && $('home').hidden;
+  const flick = .75 + Math.random() * .5;
+  sparkSprite.scale.setScalar((phase === 'ready' ? .4 + Math.sin(now / 90) * .1 : .5) * flick);
+  sparkLight.position.copy(sp).setY(.8); sparkLight.intensity = sparkSprite.visible ? 1.6 * flick : 0;
+  source.material.emissiveIntensity = phase === 'ready' ? 1 + Math.sin(now / 80) : .5;
+  // outline the tile the spark will enter next: calm when it fits, red and urgent when it doesn't
+  const n = nextCell(); hintRing.visible = !over && grid.length && $('home').hidden && phase !== 'ready' ? true : (phase === 'ready' && $('home').hidden);
+  if (n){ hintRing.position.copy(cellPos(n.r, n.c)).setY(.03); const ok = usable(grid[n.r][n.c], n.from);
+    hintRing.material.color.set(ok ? 0xffffff : 0xff3a4a).multiplyScalar(ok ? 1.2 : 2 + Math.sin(now / 70)); hintRing.material.opacity = ok ? .5 : .9; }
+  else if (spark){ hintRing.position.copy(cellPos(spark.r, spark.c)).add(sideVec(spark.to).multiplyScalar(2)).setY(.03); hintRing.material.color.set(0xff3a4a).multiplyScalar(2 + Math.sin(now / 70)); hintRing.material.opacity = .9; }
+  for (let i = trails.length - 1; i >= 0; i--){ const t = trails[i]; t.life -= dt * 1.2; if (t.life <= 0){ scene.remove(t.m); t.m.geometry.dispose(); t.m.material.dispose(); trails.splice(i, 1); } else t.m.material.uniforms.uFade.value = t.life * t.life; }
+  CUR.uTime.value = now / 1000; drawArcs(dt);
+  for (let i = texts.length - 1; i >= 0; i--){ const t = texts[i]; t.life -= dt * (t.big ? .75 : 1.3);
+    if (t.life <= 0){ t.el.remove(); texts.splice(i, 1); continue; }
+    proj.copy(t.p); proj.y += (1 - t.life) * (t.big ? .6 : 1); proj.project(camera);
+    const sc = t.big ? 1 + Math.sin(Math.min(1, (1 - t.life) * 4) * Math.PI / 2) * .15 : 1;
+    t.el.style.transform = `translate(${(proj.x + 1) / 2 * innerWidth}px,${(1 - proj.y) / 2 * innerHeight}px) translate(-50%,-50%) scale(${sc})`;
+    t.el.style.opacity = Math.min(1, t.life * 2); }
+  const tt = now / 1000; updateZone(dt); updateMotes(dt);
+  nebula.forEach((n, i) => { n.position.x += Math.sin(tt * .1 + i) * .003; n.material.opacity = .1 + Math.sin(tt * .4 + i * 2) * .03; });
+  if (playing()) paintLive();
+  camera.position.copy(camBase);
+  if (shake > 0){ camera.position.x += (Math.random() - .5) * shake; camera.position.z += (Math.random() - .5) * shake; shake *= .86; if (shake < .005) shake = 0; }
+  composer.render();
+}
+
+// ================= HUD =================
+const fmtClock = s => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s - m * 60)).padStart(2, '0')}`; };
+let shownScore = 0;
+function setStat(id, label, val, low){ const el = $(id); if (label === null){ el.hidden = true; return; } el.hidden = false; el.firstChild.textContent = label; el.lastChild.textContent = val; el.lastChild.classList.toggle('low', !!low); }
+function paintStats(){
+  $('best').textContent = bestOf(mode).toLocaleString('en-US');
+  if (score !== shownScore){ const el = $('score'), from = shownScore, to = score, t0 = performance.now(); el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump');
+    const tick = () => { const k = Math.min(1, (performance.now() - t0) / 300); shownScore = Math.round(from + (to - from) * ease(k)); el.textContent = shownScore.toLocaleString('en-US'); if (k < 1) requestAnimationFrame(tick); }; tick(); }
+  setStat('sA', 'Level', level);
+  if (M.timed) setStat('sB', 'Time', fmtClock(timeLeft), timeLeft < 15); else setStat('sB', 'Wires', wires);
+  $('streak').textContent = '×' + (1 + Math.floor(streak / 10));
+}
+let clockStr = '';
+function paintLive(){
+  $('speedFill').style.width = Math.round(Math.min(1, speed / 3) * 100) + '%'; $('speedFill').classList.toggle('low', phase === 'stall');
+  if (M.timed){ const s = fmtClock(timeLeft); if (s !== clockStr){ clockStr = s; const b = $('sB').lastChild; b.textContent = s; b.classList.toggle('low', timeLeft < 15); } }
+}
+function paintMode(){ $('modeName').textContent = M.name; $('score').textContent = score.toLocaleString('en-US'); shownScore = score; }
+function sideVisible(on){ $('streakBox').hidden = $('speedBox').hidden = !on; }
+function overStats(){ return [['Score', score.toLocaleString('en-US')], ['Best', bestOf(mode).toLocaleString('en-US')], ['Wires', wires]].map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join(''); }
+function showOverlay(title){
+  if (score > bestOf(mode)) store.best[mode] = score;
+  const newBest = score > startBest && score > 0; persist();
+  const h = $('ovTitle'); h.textContent = title; h.className = newBest ? 'win' : '';
+  $('ovSub').textContent = newBest ? 'New best' : ''; $('ovSub').className = 'sub' + (newBest ? ' nb' : ''); $('ovSub').hidden = !newBest;
+  $('ovStats').innerHTML = overStats(); $('best').textContent = bestOf(mode).toLocaleString('en-US');
+  $('overlay').hidden = false;
+  if (PLATFORM.onGameOver) PLATFORM.onGameOver({score, best:bestOf(mode), mode, newBest, continued});
+}
+function pauseGame(){ if (over || paused || !$('home').hidden) return; paused = true; $('pStats').innerHTML = overStats(); $('pause').hidden = false; persist(); }
+function resumeGame(){ paused = false; $('pause').hidden = true; Sfx.unlock(); }
+$('pauseBtn').onclick = () => { Sfx.unlock(); pauseGame(); };
+$('pResume').onclick = resumeGame;
+$('pRestart').onclick = () => { Sfx.unlock(); newGame(); };
+$('pHome').onclick = () => { $('pause').hidden = true; paused = false; showHome(); };
+$('pHelp').onclick = () => { $('pause').hidden = true; $('coach').hidden = false; };
+$('coachOk').onclick = () => { $('coach').hidden = true; store.seen = true; paused = false; persist(); Sfx.unlock(); };
+$('ovNew').onclick = () => { Sfx.unlock(); newGame(); };
+$('ovModes').onclick = () => showHome();
+const paintSound = () => { $('soundBtn').classList.toggle('off', !sound); $('homeSound').classList.toggle('off', !sound); };
+$('soundBtn').onclick = $('homeSound').onclick = () => { sound = !sound; paintSound(); persist(); Sfx.unlock(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible'){ pauseGame(); persist(); } });
+window.NEON = {
+  // keep playing after a loss: the spark relights at the source (once per game)
+  continueGame(){ over = false; continued = true; overT = 0; if (M.timed) timeLeft = Math.max(timeLeft, 30); $('overlay').hidden = true; launch(); Sfx.zone(); persist(); paintStats(); },
+  toast(msg){ floatText(msg, new THREE.Vector3(0, 1.2, 0), '#ffd84a', 26, true); },
+  get mode(){ return mode; }, get over(){ return over; },
+  set adOpen(v){ adOpen = !!v; },
+};
+
+// ================= home =================
+const BADGE = {rush:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2h5"/></svg>',
+  zen:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19c0-8 6-14 15-14 0 9-6 15-14 15"/><path d="M5 19 13 11"/></svg>'};
+// each card: a little board with a lit path through it
+const DEMO = {classic:['C1S1C2S0', 'S0C0C3S0', 'C0S1C2C3', 'S0X0S1C3'], rush:['S1S1C2C1', 'C0S1C3S0', 'X0S1S1C3', 'C0S1C2S0'], zen:['C1C2C1C2', 'C0C3C0C3', 'C1C2C1C2', 'C0C3C0C3']};
+const LIT = {classic:[[3, 1], [2, 1], [2, 2], [1, 2]], rush:[[3, 2], [2, 2], [2, 1], [2, 0]], zen:[[3, 0], [2, 0], [2, 1], [3, 1]]};
+function miniBoard(cv, id){
+  const dpr = Math.min(3, devicePixelRatio || 1) * UIZ(), w = cv.clientWidth || 200; cv.width = cv.height = Math.round(w * dpr); cv.style.height = w + 'px';
+  const x = cv.getContext('2d'); x.scale(dpr, dpr); const n = 4, s = w / n;
+  const rows = DEMO[id].map(r => r.match(/../g)), lit = new Set(LIT[id].map(([r, c]) => r * 10 + c));
+  rows.forEach((row, r) => row.forEach((code, c) => {
+    const px = c * s, py = r * s; x.fillStyle = '#1a1340'; x.beginPath(); x.roundRect ? x.roundRect(px + 2, py + 2, s - 4, s - 4, 6) : x.rect(px + 2, py + 2, s - 4, s - 4); x.fill();
+    const t = code[0], rot = +code[1], on = lit.has(r * 10 + c); x.strokeStyle = on ? '#ffb84a' : '#5a4cc0'; x.lineWidth = s * .12; x.lineCap = 'round';
+    if (on){ x.shadowColor = '#ffb84a'; x.shadowBlur = 10; } else x.shadowBlur = 0;
+    const mid = [[px + s / 2, py], [px + s, py + s / 2], [px + s / 2, py + s], [px, py + s / 2]], cxy = [px + s / 2, py + s / 2];
+    const ends = (t === 'S' ? [[0, 2]] : t === 'C' ? [[0, 1]] : [[0, 2], [1, 3]]).map(([a, b]) => [(a + rot) % 4, (b + rot) % 4]);
+    for (const [a, b] of ends){ x.beginPath(); x.moveTo(...mid[a]); x.quadraticCurveTo(...cxy, ...mid[b]); x.stroke(); }
+  }));
+}
+let shelfMode = 'classic';
+const inProgress = id => { const g = store.games[id]; return !!(g && g.grid && g.wires > 0); };
+function buildShelf(){
+  $('shelf').innerHTML = MODE_IDS.map(id => { const m = MODES[id];
+    return `<button class="mcard2" data-mode="${id}"><div class="mini"><canvas></canvas>${BADGE[id] ? `<span class="badge">${BADGE[id]}</span>` : ''}</div><b>${m.name}</b><p>${m.desc}</p>
+      <span class="meta"><span>Best<b>${bestOf(id).toLocaleString('en-US')}</b></span>${inProgress(id) ? '<em>In progress</em>' : ''}</span></button>`; }).join('');
+  $('dots').innerHTML = MODE_IDS.map(() => '<i></i>').join('');
+  requestAnimationFrame(() => [...$('shelf').children].forEach(card => miniBoard(card.querySelector('canvas'), card.dataset.mode)));
+}
+function focusShelf(id, smooth){
+  shelfMode = id; const i = MODE_IDS.indexOf(id), card = $('shelf').children[i];
+  if (card) $('shelf').scrollTo({left:card.offsetLeft - ($('shelf').clientWidth - card.offsetWidth) / 2, behavior:smooth ? 'smooth' : 'auto'});
+  paintShelf();
+}
+function paintShelf(){
+  [...$('shelf').children].forEach(c => c.classList.toggle('on', c.dataset.mode === shelfMode));
+  [...$('dots').children].forEach((d, i) => d.classList.toggle('on', MODE_IDS[i] === shelfMode));
+  $('playBtn').textContent = inProgress(shelfMode) ? 'Continue' : 'Play';
+}
+let shelfT = 0;
+$('shelf').addEventListener('scroll', () => {
+  const sh = $('shelf'), mid = sh.scrollLeft + sh.clientWidth / 2;
+  let bestId = shelfMode, bd = 1e9; for (const c of sh.children){ const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd){ bd = d; bestId = c.dataset.mode; } }
+  if (bestId !== shelfMode){ shelfMode = bestId; paintShelf(); clearTimeout(shelfT); shelfT = setTimeout(() => Sfx.bump(), 60); }
+}, {passive:true});
+$('shelf').addEventListener('click', e => { const c = e.target.closest('[data-mode]'); if (!c) return; Sfx.unlock(); if (c.dataset.mode === shelfMode) startPlay(); else focusShelf(c.dataset.mode, true); });
+function paintHome(){ buildShelf(); paintSound(); requestAnimationFrame(() => focusShelf(mode, false)); }
+function boardVisible(on){ tray.visible = underGlow.visible = source.visible = on; for (const row of grid) for (const t of row) t.g.visible = on; for (const t of trails) t.m.visible = on; if (spark) spark.lit.visible = on; sideVisible(on); }
+function showHome(){ persist(); paintHome(); boardVisible(false); $('overlay').hidden = $('pause').hidden = $('coach').hidden = true; $('home').hidden = false; $('hud').hidden = true; $('hint').hidden = true; }
+function startPlay(){
+  Sfx.unlock();
+  if (shelfMode !== mode || over) setMode(shelfMode);
+  boardVisible(true); $('home').hidden = true; $('hud').hidden = false; $('hint').hidden = false; paused = false;
+  if (over) newGame();
+  launch(); paintMode(); paintStats(); resize(); Sfx.zone();
+  if (!store.seen) $('coach').hidden = false;
+}
+$('playBtn').onclick = startPlay;
+
+// ================= sound (synthesized) =================
+const Sfx = (() => {
+  let ac = null, out = null, hum = null;
+  const unlock = () => { if (ac){ ac.resume && ac.resume(); return; } try { ac = new (window.AudioContext || window.webkitAudioContext)(); out = ac.createGain(); out.gain.value = .5; out.connect(ac.destination); } catch(e){} };
+  function tone(f0, f1, dur, type = 'sine', vol = .15, delay = 0){
+    if (!ac || !sound) return; const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), gn = ac.createGain(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .008); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(out); o.start(t); o.stop(t + dur + .03);
+  }
+  function noise(dur, vol, f, delay = 0){
+    if (!ac || !sound) return; const t = ac.currentTime + delay, b = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+    const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), gn = ac.createGain(); s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = .8; gn.gain.value = vol;
+    s.connect(bp); bp.connect(gn); gn.connect(out); s.start(t);
+  }
+  const note = n => 262 * Math.pow(2, n / 12);
+  return {unlock,
+    turn:() => { tone(900, 700, .05, 'triangle', .05); noise(.03, .03, 3000); },
+    bump:() => tone(140, 90, .08, 'sine', .07),
+    ignite:() => { noise(.4, .12, 1800); tone(200, 600, .3, 'sawtooth', .03); },
+    sizzle:() => noise(.08, .06, 4500),
+    cross:() => [0, 7, 12].forEach((s, i) => tone(note(s + 12), note(s + 12), .2, 'triangle', .07, i * .05)),
+    bulb:() => [0, 4, 7, 12].forEach((s, i) => tone(note(s + 7), note(s + 7), .25, 'sine', .07, i * .04)),
+    streak:() => [0, 4, 7, 11, 14].forEach((s, i) => tone(note(s + 5), note(s + 5), .3, 'triangle', .06, i * .05)),
+    fizzle:() => { noise(.6, .25, 700); tone(300, 40, .5, 'sawtooth', .06); },
+    zone:() => { [0, 7, 12, 19].forEach((n, i) => tone(note(n), note(n), .8, 'sine', .07, i * .09)); noise(.9, .05, 500); },
+    lose:() => [0, 1, 2, 3].forEach(i => tone(330 / (1 + i * .2), 200 / (1 + i * .2), .32, 'triangle', .1, i * .15)),
+  };
+})();
+
+// ================= start =================
+paintSound();
+const splashT0 = performance.now();
+$('splashBar').style.width = '45%';
+function hideSplash(){
+  $('splashBar').style.width = '100%';
+  const wait = Math.max(0, 1400 - (performance.now() - splashT0));
+  setTimeout(() => { $('splash').classList.add('out'); setTimeout(() => $('splash').remove(), 550); }, wait);
+}
+const begin = () => {
+  $('splashBar').style.width = '80%';
+  resize();
+  setMode(MODES[store.mode] ? store.mode : 'classic');
+  showHome();
+  requestAnimationFrame(frame); requestAnimationFrame(() => requestAnimationFrame(hideSplash));
+};
+(document.fonts && document.fonts.load ? Promise.all([document.fonts.load("100px 'Russo One'"), document.fonts.load("80px 'Neonderthaw'")]).catch(() => {}) : Promise.resolve()).then(begin);
+})();
+</script>
+<script>// Runs inside each game page, after the game's own code. It adds a way back to the arcade and turns finished rounds into XP.
+(() => {
+  const GAME = window.ARCADE_GAME, A = window.Arcade, P = window.PLATFORM || (window.PLATFORM = {});
+  if (!GAME || !A) return;
+  A.state.last = GAME; A.save();
+
+  // back to the arcade: a key in the game's own top bar, drawn in that game's own style
+  const top = document.getElementById('homeTop');
+  if (top){
+    // borrow the class of the game's own top-bar buttons ('key' in most games, 'chip' in Tightrope)
+    const own = top.querySelector('button'), cls = own && own.classList.contains('chip') ? 'chip' : 'key';
+    const b = document.createElement('button'); b.className = cls; b.id = 'arcadeBack'; b.setAttribute('aria-label', 'Back to all games');
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6"/></svg><span>Games</span>';
+    b.onclick = e => { e.stopPropagation(); location.href = '../index.html'; };
+    top.prepend(b);
+    // Tightrope's chips are light-on-dark: its icons are white, so the label is too
+    if (cls === 'chip') b.style.color = '#fff';
+  }
+  const css = document.createElement('style');
+  css.textContent = `#arcadeBack{margin-right:auto;display:inline-flex;align-items:center;gap:4px;padding:0 14px 0 8px!important;font-weight:700;font-size:15px}
+    #arcadeBack svg{width:20px;height:20px}
+    #homeTop{justify-content:flex-end}
+    .arcadeToast{position:fixed;left:50%;top:calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
+      font:700 14px/1.2 system-ui,-apple-system,sans-serif;color:#fff;animation:arcIn .35s cubic-bezier(.2,1.4,.4,1) both, arcOut .4s ease 3.4s forwards}
+    .arcadeToast b{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;background:rgba(20,18,40,.88);box-shadow:0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+    .arcadeToast b i{font-style:normal;color:#ffd23f}
+    .arcadeToast small{padding:6px 12px;border-radius:999px;background:rgba(62,224,197,.92);color:#0d2a26;font-weight:800;white-space:nowrap}
+    @keyframes arcIn{from{opacity:0;transform:translate(-50%,-14px) scale(.9)}}
+    @keyframes arcOut{to{opacity:0;transform:translate(-50%,-10px)}}`;
+  // no text selection, magnifier loupe or callout on a long press in any game (iOS shows them on plain text otherwise)
+  css.textContent += `*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}input,textarea{-webkit-user-select:text;user-select:text}`;
+  addEventListener('contextmenu', e => e.preventDefault()); document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+  document.head.appendChild(css);
+
+  // every finished round counts toward the player's arcade level and today's missions
+  const orig = P.onGameOver;
+  P.onGameOver = function(r){
+    let res = null; try { res = A.report(GAME, r); } catch(e){}
+    if (res) setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'arcadeToast';
+      t.innerHTML = `<b><i>+${res.gain} XP</i>${res.levelUp ? ` · Level ${res.levelUp}!` : ''}</b>` + res.done.map(d => `<small>✓ ${d}</small>`).join('');
+      document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+    }, 900);
+    return orig ? orig.apply(this, arguments) : undefined;
+  };
+})();
+</script>
+</body>
+</html>

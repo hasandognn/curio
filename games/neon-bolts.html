@@ -1,0 +1,1630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.ARCADE_GAME = "neon-bolts";
+// Curio: the shared layer every page loads (the hub and each game).
+// One save ('arcade-v1') holds the player's level, daily missions and streak; each game keeps its own save untouched.
+window.Arcade = (() => {
+  const KEY = 'arcade-v1';
+  const GAMES = [
+    {id:'neon-2048', name:'Neon 2048', blurb:'Slide and merge tiles of light', color:'#ff8a3d', cat:'puzzle'},
+    {id:'neon-blocks', name:'Neon Blocks', blurb:'Stack, clear and light up the well', color:'#ff4d8d', cat:'puzzle'},
+    {id:'neon-orbit', name:'Neon Orbit', blurb:'Turn the ring, fire, light up the core', color:'#ffd23f', cat:'reflex'},
+    {id:'neon-fuse', name:'Neon Fuse', blurb:'Turn the wires, keep the spark alive', color:'#3ee0c5', cat:'puzzle'},
+    {id:'neon-tilt', name:'Neon Tilt', blurb:'Tilt the board, roll every ball home', color:'#5aa9ff', cat:'puzzle'},
+    {id:'paper-echo', name:'Paper Echo', blurb:'Paper birds sing, you sing it back', color:'#f2b84b', cat:'calm'},
+    {id:'afterimage', name:'Afterimage', blurb:'Your past self is right behind you', color:'#8f7bff', cat:'reflex'},
+    {id:'halves', name:'Halves', blurb:'One swipe, two equal halves', color:'#ffd400', cat:'puzzle'},
+    {id:'tightrope', name:'Tightrope', blurb:'Keep your balance high above the city', color:'#ff6b5b', cat:'reflex'},
+    {id:'lily', name:'Lily', blurb:'A frog, a pond, a night of fireflies', color:'#e8c26a', cat:'reflex'},
+    {id:'steep', name:'Steep', blurb:'A little tea house, poured by hand', color:'#d9733f', cat:'calm'},
+    {id:'deckload', name:'Deckload', blurb:'Load her up, keep her level', color:'#e8a33a', cat:'physics'},
+    {id:'tidepool', name:'Tidepool', blurb:'Send the tide, settle every creature', color:'#3fb8c4', cat:'puzzle'},
+    {id:'kite', name:'Kite', blurb:'Ride the gusts, mind the line', color:'#ff7a59', cat:'reflex'},
+    {id:'neon-pour', name:'Neon Pour', blurb:'Pour the light, sort every colour', color:'#c86bff', cat:'puzzle'},
+    {id:'neon-bolts', name:'Neon Bolts', blurb:'Spin the nuts, light every bolt', color:'#3ee0c5', cat:'puzzle'},
+    {id:'pottery', name:'Pottery', blurb:'Throw it, fire it, put it on the shelf', color:'#d9733f', cat:'calm'},
+  ];
+  // shelf tabs, in the order they appear
+  const CATS = [{id:'puzzle', name:'Puzzle'}, {id:'reflex', name:'Reflex'}, {id:'calm', name:'Calm'}, {id:'physics', name:'Build'}];
+  const byId = Object.fromEntries(GAMES.map(g => [g.id, g]));
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const dayNum = s => Math.round(new Date(s + 'T12:00:00').getTime() / 864e5);
+
+  let S;
+  function load(){
+    try { S = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ S = null; }
+    S = Object.assign({xp:0, runs:{}, best:{}, played:0, streak:{last:'', days:0}, daily:null, last:null, noads:false, seen:false}, S || {});
+  }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+  load();
+
+  // levels: each one asks a little more than the last
+  const need = L => 100 + (L - 1) * 40;
+  function level(){ let L = 1, x = S.xp; while (x >= need(L)){ x -= need(L); L++; } return {level:L, into:x, need:need(L)}; }
+
+  // three missions a day, from three different games, the same for the whole day
+  function rng(seed){ let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function daily(){
+    const d = today();
+    if (S.daily && S.daily.date === d) return S.daily;
+    const R = rng(dayNum(d) * 7919), pool = GAMES.slice();
+    for (let i = pool.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const list = pool.slice(0, 3).map((g, i) => {
+      const best = S.best[g.id] || 0, kind = i === 0 ? 'play' : best > 0 && R() < .6 ? 'score' : i === 2 ? 'best' : 'play';
+      if (kind === 'score') return {game:g.id, kind, target:Math.max(1, Math.round(best * (.45 + R() * .2))), prog:0, done:false};
+      if (kind === 'best') return {game:g.id, kind, target:1, prog:0, done:false};
+      return {game:g.id, kind:'play', target:2 + Math.floor(R() * 2), prog:0, done:false};
+    });
+    S.daily = {date:d, list, bonus:false}; save(); return S.daily;
+  }
+  const missionText = m => { const n = byId[m.game].name;
+    return m.kind === 'play' ? `Play ${m.target} rounds of ${n}` : m.kind === 'score' ? `Score ${m.target.toLocaleString('en-US')} in ${n}` : `Beat your best in ${n}`; };
+
+  // a finished round from any game: XP, missions, streak
+  function report(game, r){
+    r = r || {}; const score = +r.score || 0, newBest = !!r.newBest;
+    S.runs[game] = (S.runs[game] || 0) + 1; S.played++; S.last = game;
+    if (score > (S.best[game] || 0)) S.best[game] = score;
+    const before = level().level; let gain = 20 + (newBest ? 25 : 0); const done = [];
+    for (const m of daily().list){ if (m.done || m.game !== game) continue;
+      if (m.kind === 'play') m.prog++; else if (m.kind === 'score') m.prog = Math.max(m.prog, score); else if (newBest) m.prog = 1;
+      if (m.prog >= m.target){ m.done = true; gain += 100; done.push(missionText(m)); } }
+    if (!S.daily.bonus && S.daily.list.every(m => m.done)){ S.daily.bonus = true; gain += 150; done.push('All three missions'); }
+    // a day with at least one finished round keeps the streak going
+    const d = today(); if (S.streak.last !== d){ S.streak.days = S.streak.last && dayNum(d) - dayNum(S.streak.last) === 1 ? S.streak.days + 1 : 1; S.streak.last = d; }
+    S.xp += gain; save();
+    const after = level().level;
+    return {gain, done, levelUp:after > before ? after : 0};
+  }
+  const streak = () => { const d = today(); return S.streak.last && dayNum(d) - dayNum(S.streak.last) <= 1 ? S.streak.days : 0; };
+  return {GAMES, CATS, byId, get state(){ return S; }, level, daily, missionText, report, streak, save, reload:load};
+})();
+</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Neon Bolts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Sora:wght@400;500;600;700&family=Neonderthaw&display=swap" rel="stylesheet">
+<style>
+/* Same family as Neon 2048, Neon Tilt and Neon Fuse: solid keycaps with a thick lower edge, no glass. The glowing nuts are the loud thing. */
+:root{--night:#0e0a24;--panel:#1b1442;--key:#2b2163;--key-edge:#160f38;--orange:#ff8a3c;--orange-edge:#b4501a;--blue:#3a4888;--text:#efeaff;--dim:#a99fd6;
+  --num:'Russo One',system-ui,sans-serif;--ui:'Sora',system-ui,sans-serif;--st:var(--safe-top,env(safe-area-inset-top,0px));--sb:var(--safe-bottom,env(safe-area-inset-bottom,0px))}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--night);color:var(--text);font-family:var(--ui);user-select:none;-webkit-user-select:none;touch-action:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+#fx{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:3}
+.ft{position:absolute;left:0;top:0;font-family:var(--num);white-space:nowrap;transform:translate(-50%,-50%);will-change:transform,opacity}
+button{font:inherit;color:inherit;border:0;cursor:pointer;background:none;padding:0}
+button:focus-visible{outline:2px solid var(--orange);outline-offset:3px}
+
+/* top: pause, mode, stars on one line; the big level number and two small stats under it */
+#hud{position:fixed;left:0;right:0;top:calc(var(--st) + 10px);display:flex;justify-content:center;pointer-events:none;z-index:2}
+.bar{width:min(460px,calc(100vw - 24px));display:grid;gap:4px}
+.bar .top{display:flex;align-items:center;gap:10px}
+.bar .top .key{pointer-events:auto}
+#modeName{font-size:15px;font-weight:600;color:var(--dim)}
+.best{margin-left:auto;font-size:14px;font-weight:500;color:var(--dim)}
+.best b{font-family:var(--num);font-weight:400;color:var(--text);margin-left:4px}
+.scoreline{display:flex;align-items:flex-end;gap:12px}
+#score{font-family:var(--num);font-size:44px;line-height:1;letter-spacing:-.01em;font-variant-numeric:tabular-nums;text-shadow:0 4px 0 var(--key-edge);white-space:nowrap}
+.stats2{margin-left:auto;display:flex;gap:16px}
+.stats2 span{display:grid;justify-items:end}
+.stats2 small{font-size:12px;color:var(--dim)}
+.stats2 b{font-family:var(--num);font-weight:400;font-size:22px;line-height:1.1;font-variant-numeric:tabular-nums}
+.stats2 b.low{color:var(--orange)}
+
+/* undo, restart, hint, extra bolt under the board */
+#bottom{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 30px);display:flex;justify-content:center;gap:12px;z-index:2}
+.cnt{position:relative}
+.cnt em{position:absolute;right:-6px;top:-6px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--orange);color:#2a1100;font-style:normal;font-family:var(--num);font-size:13px;display:grid;place-items:center;box-shadow:0 2px 0 var(--orange-edge)}
+.cnt.empty em{background:#3a3170;color:var(--dim);box-shadow:none}
+.cnt.free em{display:none}
+/* hint: bouncing arrows over the bolt to lift and the bolt to drop on */
+.harrow{position:fixed;left:0;top:0;z-index:3;width:44px;height:52px;margin:-52px 0 0 -22px;pointer-events:none;display:grid;justify-items:center;align-content:end;gap:2px}
+.harrow i{display:block;width:34px;height:34px;background:no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffd84a' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4v16M5 13l7 7 7-7'/%3E%3C/svg%3E");filter:drop-shadow(0 0 8px #ffb21f);animation:hbob .6s ease-in-out infinite alternate}
+.harrow b{font-family:var(--num);font-weight:400;font-size:14px;color:#ffd84a;text-shadow:0 0 8px #ffb21f}
+.harrow.turn i{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237af7ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 12a8 8 0 1 1-2.3-5.7'/%3E%3Cpath d='M20 4v5h-5'/%3E%3C/svg%3E");filter:drop-shadow(0 0 8px #2ee6ff)}
+.harrow.turn b{color:#7af7ff;text-shadow:0 0 8px #2ee6ff}
+@keyframes hbob{to{transform:translateY(-8px)}}
+.starRow{display:flex;justify-content:center;gap:12px}
+.starRow i{width:54px;height:54px;display:grid;place-items:center;animation:pop .4s cubic-bezier(.3,1.6,.5,1) both}
+.starRow svg{width:54px;height:54px;fill:#2b2163;stroke:#3a3170;stroke-width:1.5;stroke-linejoin:round}
+.starRow i.on svg{fill:#ffd84a;stroke:#ffb21f;filter:drop-shadow(0 0 10px rgba(255,200,60,.7))}
+@keyframes pop{from{transform:scale(.3);opacity:0}}
+#winSheet{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(8,5,22,.62);animation:fade .25s}
+
+/* keycaps */
+.key{height:52px;min-width:52px;padding:0 16px;border-radius:14px;display:inline-grid;place-items:center;background:var(--key);box-shadow:0 5px 0 var(--key-edge);font-weight:600;font-size:15px;transition:transform .07s,box-shadow .07s}
+.key:active{transform:translateY(4px);box-shadow:0 1px 0 var(--key-edge)}
+.key:disabled{opacity:.35;pointer-events:none}
+.key svg{width:22px;height:22px;fill:none;stroke:var(--text);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.key.primary{background:var(--orange);box-shadow:0 5px 0 var(--orange-edge);color:#2a1100;font-family:var(--num);font-weight:400;font-size:18px;padding:0 28px}
+.key.primary:active{box-shadow:0 1px 0 var(--orange-edge)}
+.key.small{height:40px;min-width:40px;padding:0;border-radius:12px;box-shadow:0 4px 0 var(--key-edge)}
+.key.small svg{width:18px;height:18px}
+#soundBtn.off svg .wave,#homeSound.off svg .wave{display:none}#soundBtn svg .x,#homeSound svg .x{display:none}#soundBtn.off svg .x,#homeSound.off svg .x{display:inline}
+#hint{position:fixed;left:0;right:0;bottom:calc(var(--sb) + 8px);z-index:2;text-align:center;font-size:13px;color:var(--dim);transition:opacity .4s;pointer-events:none}
+
+/* sheets: stuck, pause, how to play, a new twist. Solid panels, sentence case. */
+#overlay,#pause,#coach,#intro{position:fixed;inset:0;z-index:5;display:grid;place-items:end center;padding:16px 12px calc(var(--sb) + 12px);background:rgba(8,5,22,.62);animation:fade .25s}
+@keyframes fade{from{opacity:0}}
+.card{width:min(460px,100%);background:var(--panel);border-radius:22px;padding:22px 20px 18px;display:grid;gap:16px;animation:up .3s cubic-bezier(.2,1.2,.4,1)}
+@keyframes up{from{transform:translateY(30px);opacity:0}}
+.card h2{margin:0;font-family:var(--num);font-weight:400;font-size:32px;line-height:1.05}
+.card h2.win{color:#ffd84a}
+.card .sub{margin:-10px 0 0;font-size:14px;color:var(--dim);line-height:1.4}
+.card .sub.nb{color:#ffd84a;font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border-radius:14px;background:var(--night);padding:12px 4px}
+.stats div{text-align:center}
+.stats div + div{border-left:1px solid #2a2256}
+.stats small{display:block;font-size:12px;color:var(--dim)}
+.stats b{font-family:var(--num);font-weight:400;font-size:21px}
+.row{display:flex;gap:10px}.row .key{flex:1}
+.coach{display:grid;gap:10px}
+.coach div{display:grid;grid-template-columns:44px 1fr;gap:12px;align-items:center}
+.coach i{width:44px;height:44px;border-radius:12px;background:var(--night);display:grid;place-items:center}
+.coach i svg{width:24px;height:24px;fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.coach b{display:block;font-weight:600;font-size:15px}
+.coach p{margin:1px 0 0;font-size:13px;color:var(--dim)}
+.kbd{font-size:12px;color:var(--dim);text-align:center}
+#intro .tag{justify-self:start;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#2a1100;background:#ffd84a;border-radius:8px;padding:4px 9px;margin-bottom:-6px}
+#intro .art{height:120px;border-radius:14px;background:var(--night);overflow:hidden}
+#intro .art canvas{display:block;width:100%;height:100%}
+
+/* banners */
+.zone{position:fixed;left:0;right:0;top:27%;z-index:3;text-align:center;font-family:var(--num);font-size:34px;pointer-events:none;color:#fff;text-shadow:0 4px 0 rgba(0,0,0,.35);animation:zone 2.6s ease forwards}
+.zone small{display:block;font-family:var(--ui);font-weight:500;font-size:14px;color:var(--dim);margin-bottom:6px}
+@keyframes zone{0%{opacity:0;transform:translateY(10px)}15%{opacity:1;transform:none}75%{opacity:1}100%{opacity:0;transform:translateY(-14px)}}
+
+#splash{position:fixed;inset:0;z-index:20;background:var(--night);display:grid;place-items:center;transition:opacity .5s ease,transform .5s ease}
+#splash.out{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .mark{display:grid;justify-items:center;gap:26px}
+#splash .bar{width:180px;height:6px;border-radius:3px;background:var(--panel);overflow:hidden;display:block}
+#splash .bar i{display:block;height:100%;width:0;border-radius:3px;background:var(--orange);transition:width .3s}
+/* logo: a neon-sign 'Neon' over BOLTS spelled on five tilted blocks */
+.logo2{display:grid;justify-items:center;gap:4px}
+.logo2 .tube{font-family:'Neonderthaw',cursive;font-size:84px;line-height:.9;color:#ffe6f7;
+  text-shadow:0 0 4px #fff,0 0 10px #ff4fd8,0 0 22px #ff4fd8,0 0 44px #ff2fb8;animation:flick 1.6s .4s both}
+@keyframes flick{0%,8%,12%,22%{opacity:.15;text-shadow:none}10%,20%,100%{opacity:1}}
+.logo2 .tiles{display:flex;gap:6px}
+.logo2 .tiles i{font-style:normal;width:58px;height:58px;border-radius:10px;display:grid;place-items:center;font-family:var(--num);font-size:30px;color:#fff;box-shadow:0 6px 0 rgba(0,0,0,.4),inset 0 2px 0 rgba(255,255,255,.35);text-shadow:0 3px 0 rgba(0,0,0,.25)}
+.logo2 .tiles i:nth-child(1){background:#2ec4ff;transform:translateY(5px)}
+.logo2 .tiles i:nth-child(2){background:#b45cff}
+.logo2 .tiles i:nth-child(3){background:#ff8a3c;transform:translateY(3px)}
+.logo2 .tiles i:nth-child(4){background:#ffd84a;color:#4a2400}
+.logo2 .tiles i:nth-child(5){background:#3dffa0;color:#053a22;transform:translateY(4px)}
+.logo2 .tiles i:nth-child(6){background:#ff3d5e;transform:translateY(-2px)}
+.logo2.small .tube{font-size:62px}
+.logo2.small .tiles i{width:46px;height:46px;font-size:26px;border-radius:10px}
+#splash .logo2 .tiles i{opacity:0;animation:tileIn .45s cubic-bezier(.3,1.5,.5,1) forwards}
+@keyframes tileIn{from{opacity:0;translate:0 -40px}to{opacity:1;translate:0 0}}
+#splash .logo2 .tiles i:nth-child(2){animation-delay:.08s}#splash .logo2 .tiles i:nth-child(3){animation-delay:.16s}#splash .logo2 .tiles i:nth-child(4){animation-delay:.24s}#splash .logo2 .tiles i:nth-child(5){animation-delay:.32s}#splash .logo2 .tiles i:nth-child(6){animation-delay:.4s}
+
+/* home: space keeps drifting behind; wordmark up top, the mode shelf and the play key at thumb height */
+#home{position:fixed;inset:0;z-index:4;display:grid;grid-template-rows:auto auto 1fr auto;padding:calc(var(--st) + 10px) 0 calc(var(--sb) + 22px);background:radial-gradient(120% 70% at 50% 35%,rgba(14,10,36,0),rgba(14,10,36,.55))}
+#homeTop{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:0 16px;min-height:44px}
+#homeTop .key{height:42px;min-width:42px;padding:0 10px;border-radius:12px}
+#homeTop .key svg{width:20px;height:20px}
+#home .word{justify-self:center;text-align:center;margin-top:8px}
+#home .word small{display:block;font-family:var(--ui);font-weight:500;font-size:15px;color:var(--dim);margin-top:20px}
+#shelf{align-self:center;display:flex;gap:14px;overflow-x:auto;scroll-snap-type:x mandatory;padding:18px calc(50vw - 115px) 22px;scrollbar-width:none;touch-action:pan-x}
+#shelf::-webkit-scrollbar{display:none}
+.mcard2{flex:0 0 230px;scroll-snap-align:center;border-radius:22px;padding:16px;background:var(--panel);box-shadow:0 6px 0 var(--key-edge);text-align:left;display:grid;gap:10px;transition:transform .25s,opacity .25s;opacity:.55;transform:scale(.92)}
+.mcard2.on{opacity:1;transform:none}
+.mcard2 .mini{position:relative;border-radius:14px;background:var(--night);padding:8px}
+.mcard2 .mini canvas{display:block;width:100%;margin:0 auto}
+.mcard2 .mini .badge{position:absolute;right:-6px;top:-6px;width:38px;height:38px;border-radius:12px;background:var(--orange);color:#2a1100;display:grid;place-items:center;box-shadow:0 4px 0 var(--orange-edge)}
+.mcard2 .mini .badge svg{width:22px;height:22px}
+.mcard2 b{font-weight:600;font-size:19px}
+.mcard2 p{margin:-6px 0 0;font-size:13px;color:var(--dim);line-height:1.35;min-height:36px}
+.mcard2 .meta{display:flex;justify-content:space-between;gap:8px;align-items:baseline;font-size:13px;color:var(--dim)}
+.mcard2 .meta span b{font-family:var(--num);font-weight:400;font-size:17px;color:var(--text);margin-left:4px}
+#dots{display:flex;justify-content:center;gap:7px;margin-top:-6px}
+#dots i{width:7px;height:7px;border-radius:4px;background:#3a3170;transition:width .2s,background .2s}
+#dots i.on{width:20px;background:var(--orange)}
+#home .bottomset{width:min(420px,calc(100% - 32px));justify-self:center;display:grid;gap:14px}
+#playBtn{height:64px;font-size:24px;width:100%}
+@media (max-height:700px){
+  #home .word{margin-top:0}#home .word small{display:none}
+  #home .logo2 .tube{font-size:58px}#home .logo2 .tiles i{width:38px;height:38px;font-size:22px;border-radius:9px}
+  #shelf{padding:10px calc(50vw - 90px) 14px}.mcard2{flex-basis:180px;padding:12px;gap:8px}.mcard2 p{display:none}.mcard2 b{font-size:16px}
+  #playBtn{height:54px;font-size:20px}
+  #score{font-size:36px}.stats2 b{font-size:19px}
+  #bottom{--bb:24px}
+}
+@media (max-width:360px){ #bottom{gap:9px} #bottom .key{min-width:48px;height:48px;padding:0 12px} #score{font-size:38px} }
+@media (max-height:520px){ #home .logo2 .tiles{display:none} .mcard2{flex-basis:150px} #shelf{padding:6px calc(50vw - 75px) 10px} }
+/* tablets: the whole UI scales up (--uiz from script) instead of floating small; phones keep --uiz = 1 */
+#hud .bar,#bottom .key,#home>*,.card,#hint,.harrow,.zone{zoom:var(--uiz,1)}
+#bottom{gap:calc(12px * var(--uiz,1));bottom:calc(var(--sb) + var(--bb,30px) * var(--uiz,1))}
+body.wide #shelf{justify-content:center;overflow:visible;padding-left:16px!important;padding-right:16px!important}
+body.wide #dots{display:none}
+body.wide .mcard2{flex-basis:250px;opacity:.8}
+body.wide .mcard2.on{opacity:1;box-shadow:0 6px 0 var(--key-edge),0 0 0 3px var(--orange)}
+body.wide #home .word small{margin-top:12px}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition-duration:.01s!important}}
+</style>
+</head>
+<body>
+<div id="splash" role="status" aria-label="Loading"><div class="mark">
+  <div class="logo2 small"><span class="tube">Neon</span><span class="tiles"><i>B</i><i>O</i><i>L</i><i>T</i><i>S</i></span></div>
+  <span class="bar"><i id="splashBar"></i></span>
+</div></div>
+<div id="stage"></div>
+<div id="home" hidden>
+  <div id="homeTop">
+    <button class="key" id="homeSound" aria-label="Sound"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button>
+  </div>
+  <div class="word"><div class="logo2"><span class="tube">Neon</span><span class="tiles"><i>B</i><i>O</i><i>L</i><i>T</i><i>S</i></span></div><small>Spin every glowing nut home</small></div>
+  <div style="display:grid;align-content:center"><div id="shelf"></div><div id="dots"></div></div>
+  <div class="bottomset"><button class="key primary" id="playBtn">Play</button></div>
+</div>
+<div id="hud" hidden><div class="bar">
+  <div class="top">
+    <button class="key small" id="pauseBtn" aria-label="Pause"><svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg></button>
+    <span id="modeName">Levels</span>
+    <span class="best" id="bestWrap">Stars<b id="best">0</b></span>
+  </div>
+  <div class="scoreline"><span id="score">Level 1</span><span class="stats2"><span id="sA"><small>Moves</small><b>0</b></span><span id="sB"><small>Par</small><b>0</b></span></span></div>
+</div></div>
+<div id="bottom" hidden>
+  <button class="key cnt" id="undoBtn" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg><em id="undoN">3</em></button>
+  <button class="key" id="restartBtn" aria-label="Restart"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg></button>
+  <button class="key cnt" id="hintBtn" aria-label="Hint"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z"/></svg><em id="hintN">3</em></button>
+  <button class="key cnt" id="boltBtn" aria-label="Extra bolt"><svg viewBox="0 0 24 24"><path d="M8 4h8l1.5 3H6.5z"/><path d="M12 7v14"/><path d="M9.5 11.5l5-1.5M9.5 15.5l5-1.5M9.5 19.5l5-1.5"/></svg><em id="boltN">2</em></button>
+</div>
+<div id="fx"></div>
+<div id="hint" hidden>Tap a bolt to lift its top nuts</div>
+<div class="harrow" id="hA" hidden><b>1</b><i></i></div>
+<div class="harrow" id="hB" hidden><b>2</b><i></i></div>
+<div id="pause" hidden><div class="card">
+  <h2>Paused</h2>
+  <div class="stats" id="pStats"></div>
+  <div class="row"><button class="key" id="pRestart">Restart</button><button class="key primary" id="pResume">Resume</button></div>
+  <div class="row"><button class="key" id="pHome">Main menu</button><button class="key" id="pHelp">How to play</button>
+    <button class="key" id="soundBtn" aria-label="Sound" style="flex:0 0 52px"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path class="wave" d="M15.5 8.5a5 5 0 0 1 0 7"/><path class="wave" d="M19 5a10 10 0 0 1 0 14"/><path class="x" d="m16 9 6 6m0-6-6 6"/></svg></button></div>
+</div></div>
+<div id="coach" hidden><div class="card">
+  <h2>How to play</h2>
+  <div class="coach">
+    <div><i><svg viewBox="0 0 24 24"><path d="M12 20V6M7 11l5-5 5 5"/><path d="M8 3h8"/></svg></i><span><b>Tap a bolt to lift</b><p>Its top nuts of one colour spin up the thread.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M12 4v14M7 13l5 5 5-5"/><path d="M8 21h8"/></svg></i><span><b>Tap another to screw them on</b><p>It must be empty or have the same colour on top, with room to spare.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M6 8h12l-2 4H8z"/><path d="M6 14h12l-2 4H8z"/></svg></i><span><b>One colour per bolt</b><p>A full bolt of one colour lights up. Light them all to clear the level.</p></span></div>
+    <div><i><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></i><span><b>Undo, extra bolt, hints</b><p>Each is limited. Restart is always free.</p></span></div>
+  </div>
+  <div class="kbd">Keyboard: 1–9 pick a bolt, Z undoes, R restarts, H hints, P pauses</div>
+  <button class="key primary" id="coachOk">Got it</button>
+</div></div>
+<div id="intro" hidden><div class="card">
+  <span class="tag">New</span>
+  <h2 id="introTitle">Turn bolts</h2>
+  <div class="art"><canvas id="introCv"></canvas></div>
+  <p class="sub" id="introText" style="margin:0"></p>
+  <button class="key primary" id="introOk">Got it</button>
+</div></div>
+<div id="winSheet" hidden><div class="card">
+  <h2 id="winTitle" class="win">Solved</h2>
+  <div class="starRow" id="winStars"></div>
+  <div class="stats" id="winStats"></div>
+  <div class="row"><button class="key" id="winReplay">Replay</button><button class="key primary" id="winNext">Next level</button></div>
+  <div class="row" id="winRow2"><button class="key" id="winHome">Main menu</button></div>
+</div></div>
+<div id="overlay" hidden><div class="card">
+  <h2 id="ovTitle">No moves left</h2>
+  <p class="sub" id="ovSub">Undo a move, add an extra bolt, or start over.</p>
+  <div class="row"><button class="key" id="ovUndo">Undo</button><button class="key primary" id="ovBolt">Extra bolt</button></div>
+  <div class="row" id="ovRow2"><button class="key" id="ovRestart">Restart</button><button class="key" id="ovModes">Main menu</button></div>
+</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/RoundedBoxGeometry.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>window.PLATFORM = {name:'web'};
+</script>
+<script>
+/*CORE-START*/
+// ================= rules, solver and generator (shared verbatim with tools/*.js) =================
+// A board is an array of strings, one per bolt, bottom -> top. One character per nut:
+//   'a'..'j'  plain nut of colour 0..9        (one slot high)
+//   'A'..'J'  fuse nut of colour 0..9         (one slot high; fuses with a same-colour single neighbour)
+//   'm'..'v'  fused double nut of colour 0..9 (two slots high, moves as one piece)
+// A level: {C: slots per bolt, b: start board, turn: [0|1] turn bolts, cap: [-1|colour] capped bolts, par}
+const CORE = (() => {
+  const col = k => k >= 109 ? k - 109 : k >= 97 ? k - 97 : k - 65;
+  const hgt = k => k >= 109 ? 2 : 1;
+  function rng(seed){ let a = seed >>> 0; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function shuffle(a, R){ for (let i = a.length - 1; i > 0; i--){ const j = Math.floor(R() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+  function height(s){ let h = 0; for (let i = 0; i < s.length; i++) h += s.charCodeAt(i) >= 109 ? 2 : 1; return h; }
+  // a fuse nut touching a same-colour single nut melts into one double nut; ev collects the lower index of each merge
+  function fuse(s, ev){
+    for (let i = 0; i + 1 < s.length; i++){
+      const a = s.charCodeAt(i), b = s.charCodeAt(i + 1);
+      if (a < 109 && b < 109 && col(a) === col(b) && (a < 97 || b < 97)){
+        if (ev) ev.push(i);
+        s = s.slice(0, i) + String.fromCharCode(109 + col(a)) + s.slice(i + 2); i = -1;
+      }
+    }
+    return s;
+  }
+  function complete(L, s){
+    if (!s.length || height(s) !== L.C) return false;
+    const c = col(s.charCodeAt(0)); for (let i = 1; i < s.length; i++) if (col(s.charCodeAt(i)) !== c) return false; return true;
+  }
+  function unlockedMask(L, st){ let m = 0; for (const s of st) if (complete(L, s)) m |= 1 << col(s.charCodeAt(0)); return m; }
+  const locked = (L, i, m) => L.cap[i] >= 0 && !(m >> L.cap[i] & 1);
+  function solved(L, st){ for (const s of st) if (s.length && !complete(L, s)) return false; return true; }
+  function topRun(s){ if (!s.length) return 0; const c = col(s.charCodeAt(s.length - 1)); let n = 0; for (let i = s.length - 1; i >= 0 && col(s.charCodeAt(i)) === c; i--) n++; return n; }
+  // can the top run of bolt i be screwed (at least partly) onto bolt j?
+  function canPour(L, st, i, j, m = unlockedMask(L, st)){
+    if (i === j) return false; const s = st[i], t = st[j];
+    if (!s.length || locked(L, i, m) || locked(L, j, m) || complete(L, s)) return false;
+    const tk = s.charCodeAt(s.length - 1);
+    if (t.length && col(t.charCodeAt(t.length - 1)) !== col(tk)) return false;
+    return L.C - height(t) >= hgt(tk);
+  }
+  const canLift = (L, st, i, m = unlockedMask(L, st)) => !!st[i].length && !locked(L, i, m) && !complete(L, st[i]);
+  const canTurn = (L, st, i, m = unlockedMask(L, st)) => !!L.turn[i] && canLift(L, st, i, m) && st[i].length >= 2 && topRun(st[i]) < st[i].length;
+  // legal moves: (i << 5 | j) pours i onto j, (1024 | i) turns bolt i (its bottom nut comes up to the top)
+  function moves(L, st, out = []){
+    const m = unlockedMask(L, st), n = st.length; out.length = 0;
+    for (let i = 0; i < n; i++){
+      if (!canLift(L, st, i, m)) continue;
+      const s = st[i], whole = topRun(s) === s.length, plainI = !L.turn[i] && L.cap[i] < 0; let emptyDone = false;
+      for (let j = 0; j < n; j++){
+        if (!canPour(L, st, i, j, m)) continue;
+        if (!st[j].length && !L.turn[j] && L.cap[j] < 0){
+          if (whole && plainI) continue;         // moving a one-colour bolt to an empty plain bolt changes nothing
+          if (emptyDone) continue; emptyDone = true;   // empty plain bolts are interchangeable
+        }
+        out.push(i << 5 | j);
+      }
+      if (canTurn(L, st, i, m)) out.push(1024 | i);
+    }
+    return out;
+  }
+  // ev (optional) receives {i, j, k: nuts moved, turn, fuse: [merge indices on the bolt that changed]}
+  function apply(L, st, mv, ev){
+    const ns = st.slice();
+    if (mv & 1024){
+      const i = mv & 31, s = st[i];
+      if (ev){ ev.i = ev.j = i; ev.k = 0; ev.turn = true; ev.fuse = []; }
+      ns[i] = fuse(s.slice(1) + s[0], ev && ev.fuse); return ns;
+    }
+    const i = mv >> 5, j = mv & 31, s = st[i], t = st[j], tc = col(s.charCodeAt(s.length - 1));
+    let free = L.C - height(t), k = 0;
+    for (let p = s.length - 1; p >= 0; p--){ const ch = s.charCodeAt(p); if (col(ch) !== tc || hgt(ch) > free) break; free -= hgt(ch); k++; }
+    if (ev){ ev.i = i; ev.j = j; ev.k = k; ev.turn = false; ev.fuse = []; }
+    ns[i] = s.slice(0, s.length - k); ns[j] = fuse(t + s.slice(s.length - k), ev && ev.fuse);
+    return ns;
+  }
+  function key(L, st){
+    let a = ''; const plain = [];
+    for (let i = 0; i < st.length; i++){ if (L.turn[i] || L.cap[i] >= 0) a += st[i] + ','; else plain.push(st[i]); }
+    return a + '|' + plain.sort().join(',');
+  }
+  function heur(L, st){
+    let h = 0, seen = 0; const m = unlockedMask(L, st);
+    for (let i = 0; i < st.length; i++){
+      const s = st[i]; if (!s.length || complete(L, s)) continue;
+      let mask = 0, prev = -1;
+      for (let p = 0; p < s.length; p++){ const c = col(s.charCodeAt(p)); if (p && c !== prev) h++; prev = c; mask |= 1 << c; }
+      let both = mask & seen; while (both){ h++; both &= both - 1; } seen |= mask;
+      if (locked(L, i, m)) h++;
+    }
+    return h;
+  }
+  // weighted A*: {path:[moves]} when solved, {path:null} when proven unsolvable, null when the node budget ran out
+  function solve(L, st0, opt = {}){
+    const W = opt.w || 1.6, CAP = opt.cap || 50000;
+    if (solved(L, st0)) return {path:[], nodes:0};
+    const S = [st0], par = [-1], mvs = [-1], G = [0], F = [W * heur(L, st0)], heap = [0];
+    const best = new Map([[key(L, st0), 0]]), buf = [];
+    const less = (a, b) => F[a] < F[b] || (F[a] === F[b] && G[a] > G[b]);
+    const push = id => { heap.push(id); let c = heap.length - 1; while (c){ const p = (c - 1) >> 1; if (!less(heap[c], heap[p])) break; const t = heap[c]; heap[c] = heap[p]; heap[p] = t; c = p; } };
+    const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length){ heap[0] = last; let c = 0; for (;;){ const l = 2 * c + 1, r = l + 1; let m = c;
+      if (l < heap.length && less(heap[l], heap[m])) m = l; if (r < heap.length && less(heap[r], heap[m])) m = r; if (m === c) break; const t = heap[c]; heap[c] = heap[m]; heap[m] = t; c = m; } } return top; };
+    while (heap.length){
+      const n = pop(), st = S[n], g = G[n];
+      moves(L, st, buf); const list = buf.slice();
+      for (const mv of list){
+        const ns = apply(L, st, mv), k = key(L, ns), g2 = g + 1, old = best.get(k);
+        if (old !== undefined && old <= g2) continue;
+        best.set(k, g2);
+        const id = S.length; S.push(ns); par.push(n); mvs.push(mv); G.push(g2);
+        if (solved(L, ns)){ const path = []; for (let x = id; x > 0; x = par[x]) path.push(mvs[x]); return {path:path.reverse(), nodes:id}; }
+        F.push(g2 + W * heur(L, ns)); push(id);
+        if (id > CAP) return null;
+      }
+    }
+    return {path:null, nodes:S.length};
+  }
+  // level strings: "C|bolt,bolt,...|par", a bolt is [~ turn][#x capped until colour x is done] nuts bottom->top
+  function decode(str){
+    const [C, bs, par] = str.split('|'), L = {C:+C, b:[], turn:[], cap:[], par:+par || 0};
+    for (let s of bs.split(',')){ let t = 0, c = -1; if (s[0] === '~'){ t = 1; s = s.slice(1); } if (s[0] === '#'){ c = s.charCodeAt(1) - 97; s = s.slice(2); } L.b.push(s); L.turn.push(t); L.cap.push(c); }
+    return L;
+  }
+  const encode = L => L.C + '|' + L.b.map((s, i) => (L.turn[i] ? '~' : '') + (L.cap[i] >= 0 ? '#' + String.fromCharCode(97 + L.cap[i]) : '') + s).join(',') + '|' + (L.par || 0);
+  function maxRun(s){ let best = 0, n = 0; for (let i = 0; i < s.length; i++){ n = i && col(s.charCodeAt(i)) === col(s.charCodeAt(i - 1)) ? n + 1 : 1; best = Math.max(best, n); } return best; }
+  // sp: {K colours, C slots, E empty bolts, turn, fuse, caps, capEmpty, target par, tries, cap (node budget), w, need:{turn,fuse,cap}}
+  function generate(seed, sp){
+    const R = rng(seed), K = sp.K, C = sp.C; let best = null;
+    for (let attempt = 0; attempt < (sp.tries || 30); attempt++){
+      const pcs = [], cols = shuffle([...Array(K).keys()], R);
+      for (let c = 0; c < K; c++) for (let u = 0; u < C; u++) pcs.push(97 + c);
+      for (let f = 0; f < (sp.fuse || 0); f++){ const c = cols[f % K]; const idx = pcs.indexOf(97 + c); if (idx >= 0) pcs[idx] = 65 + c; }
+      shuffle(pcs, R);
+      const b = []; for (let i = 0; i < K; i++) b.push(String.fromCharCode(...pcs.slice(i * C, i * C + C)));
+      if (b.some(s => fuse(s) !== s || maxRun(s) >= (C > 3 ? C - 1 : C))) continue;
+      for (let e = 0; e < sp.E; e++) b.push('');
+      const turn = b.map(() => 0), cap = b.map(() => -1), order = shuffle([...Array(K).keys()], R);
+      let o = 0, ok = true;
+      for (let t = 0; t < (sp.turn || 0); t++) turn[order[o++]] = 1;
+      for (let c = 0; c < (sp.caps || 0); c++){
+        let i;
+        if (sp.capEmpty && c === 0){ i = b.length; b.push(''); turn.push(0); cap.push(-1); }
+        else i = order[o++];
+        const opts = cols.filter(cc => b[i].indexOf(String.fromCharCode(97 + cc)) < 0 && b[i].indexOf(String.fromCharCode(65 + cc)) < 0 && cap.indexOf(cc) < 0);
+        if (!opts.length){ ok = false; break; }
+        cap[i] = opts[Math.floor(R() * opts.length)];
+      }
+      if (!ok) continue;
+      const L = {C, b, turn, cap, par:0};
+      const res = solve(L, b, {w:sp.w || 1.6, cap:sp.cap || 40000});
+      if (!res || !res.path) continue;
+      const need = sp.need || {};
+      if (need.turn && !res.path.some(m => m & 1024)) continue;
+      if (need.fuse){ let st = b, fused = false; for (const m of res.path){ const ev = {}; st = apply(L, st, m, ev); if (ev.fuse.length) fused = true; } if (!fused) continue; }
+      L.par = res.path.length; L.nodes = res.nodes;
+      const d = Math.abs(L.par - (sp.target || L.par));
+      if (!best || d < best.d){ best = {L, d}; if (d <= (sp.tol ?? 1)) break; }
+    }
+    return best && best.L;
+  }
+  return {col, hgt, height, fuse, complete, unlockedMask, locked, solved, topRun, canPour, canLift, canTurn, moves, apply, key, heur, solve, decode, encode, generate, rng, shuffle};
+})();
+/*CORE-END*/
+/*LEVELS-START*/const LEVELS = [
+"3|abb,aab,|3",
+"3|abb,cca,acb,|5",
+"4|cacb,abba,bacc,,|9",
+"4|cbbd,dcaa,baac,bdcd,,|12",
+"4|acba,dbbc,bdcd,daac,,|12",
+"4|bcbd,daad,caba,bdcc,,|12",
+"4|cbda,ccbd,dabb,cdaa,,|11",
+"4|cddc,baea,~baeb,dedb,acec,,|17",
+"4|daec,ebcd,aeab,~dbad,cecb,,|17",
+"4|caeb,edab,deed,bcad,acbc,,|16",
+"4|abcd,bccb,dacd,baad,,|12",
+"4|cdce,ddab,~ecad,abca,bbee,,|15",
+"4|ceca,ceab,eecd,adda,bbdb,,|15",
+"4|ecae,aead,cadc,bdcb,debb,,|16",
+"4|~dbad,ceba,cdec,aace,edbb,,|15",
+"4|eedC,aabc,bEac,dacb,dedb,,|15",
+"4|edfe,fbfe,cbAd,ccaf,bdcd,aaeb,,|20",
+"4|efeb,ddcb,acaf,bced,~aafb,dcFe,,|20",
+"4|efec,faea,aeab,cdcd,dbfb,dbcf,,|21",
+"4|ecab,baac,dbef,dcff,afeb,ecdd,,|19",
+"4|~ecdd,Acbb,edad,baae,cebc,,|15",
+"4|ecff,abde,dbca,eDca,bfaf,edcb,,|19",
+"4|cdba,cfbb,dade,eeae,fdca,cbff,,|19",
+"4|caca,#acebb,eadd,bbdc,edea,,|15",
+"4|adfa,dcce,eadf,fbDc,fbbc,eaeb,,,#b|19",
+"4|afcc,fbed,dbbe,faae,Dcbf,aedc,,|18",
+"4|febf,fdea,cdae,~cdde,fbca,cabb,,|20",
+"4|ecbe,babc,ffde,afcd,dedc,baaf,,|19",
+"4|bdca,cafd,eafc,aFee,bdcb,edbf,,|21",
+"4|~fDee,dbcc,bacd,aeef,#ecadb,affb,,|16",
+"4|eeaa,dfec,dfcb,bdec,cabb,fdaf,,|17",
+"4|fdeg,aabg,ebfd,edgc,ebad,accb,gffc,,|22",
+"4|cdbd,~bEce,fabb,fdad,cagg,gafe,gcef,,|24",
+"4|gabe,edca,ffbg,fadg,cecf,ddbg,cbEa,,|23",
+"4|baab,fcbe,gfda,fedd,fgca,ecgd,bgce,,,#a|23",
+"4|faae,#cgead,~bcde,bcfa,ebdb,fdgg,gcfc,,|23",
+"4|bcfg,cbed,eafc,gfed,daca,gbfd,gabE,,|24",
+"4|bdfe,ebaa,cgga,ffce,dagc,cfBe,bdgd,,|23",
+"4|gdca,bcae,cggd,ebfd,agee,~cbfd,afbf,,|24",
+"4|acda,fccg,ggee,gfab,edbd,#fbdab,efcf,,|22",
+"4|ffad,baae,cfee,cdcD,eadb,fcbb,,|17",
+"4|ggbd,ffae,cdab,#afbee,~cegc,Fdag,acbd,,|21",
+"4|eagg,abdc,ebcd,dbge,ffcf,aabg,fdce,,|22",
+"4|gdfc,dffc,dbae,gbcb,aaef,eead,ggcb,,|21",
+"4|bacf,dcae,decf,~bfae,egDb,agfd,bggc,|25",
+"4|ceac,bfed,bffd,egag,fbcb,aeda,cDgg,,|22",
+"4|fdgc,abab,cdee,edcg,dfgc,fbab,fega,,|24",
+"4|ddcb,gacg,#eadfc,eceb,adfb,~fbge,egaf,,|22",
+"4|egeg,fecc,gdbd,aabf,bfca,gdba,cFed,,|23",
+"4|affd,eegg,abcd,aggf,bbdF,#faecc,decb,,|19",
+"4|gade,bbcg,fcfa,bdcb,caee,~dgga,fefd,,|21",
+"4|gghd,hgaf,dhcf,eebd,haag,ffbb,ecce,dbac,,|22",
+"4|gaCb,bfae,cbgc,fghb,fhha,dfae,cgdd,eehd,,|27",
+"4|ebfc,~dgdf,bbgc,ahdc,#bAhag,eehg,chbe,adff,,|25",
+"4|fhde,gcah,cead,habf,ghga,bbed,egfc,cdfb,,,#d|26",
+"4|cbdd,gdad,caae,gfhc,fegf,cbgh,~afhb,eebh,,|25",
+"4|hafh,gdcf,bfce,dFec,~egbd,aaba,hdeg,cgbh,,|28",
+"4|ffcg,dbfe,eGhc,ehea,adfa,dgbb,ghch,cbda,,|27",
+"4|hgab,cbeg,eadc,dfbf,cgeh,gadd,hfcb,haef,,|27",
+"4|cahf,hecb,fgea,cgga,~dehb,afhc,defb,gddb,|24",
+"4|ebad,eBeb,gAfe,gdcc,cffc,gdbd,aagf,,|23",
+"4|cabf,fgec,dCdb,gdba,fgee,eaHg,chfb,dahh,,|26",
+"4|chee,aagd,hgba,dcfc,~dghc,efdb,~efba,bfgh,,|27",
+"4|ehcb,adde,ggbh,hbgc,hafb,ddcg,efaf,eacf,,|24",
+"4|fdAF,aghb,cdhc,fhfb,heae,eegg,cdbd,bcga,,,#g|27",
+"4|gccb,dgbe,chad,egBd,#bAhef,begf,~fhha,cdaf,,|27",
+"4|eabh,fafe,chhd,dgga,bhgc,cdbf,acgd,befe,,|26",
+"4|dbeg,ebbe,ghdg,achg,facc,faeh,cdhd,fbfa,,|26",
+"4|gDgb,bfga,ehbb,ahch,~cacd,dchf,dgaE,feef,,|27",
+"4|hbff,eeca,~cedb,#fdghC,gahg,gBca,dhfd,afbe,,|25",
+"4|baca,geaa,egge,cfdb,cdec,dbgf,fdbf,,|23",
+"4|gech,afhh,gdcd,#fdgbd,bfaa,ebeh,~efcf,cagb,,|27",
+"4|achd,fhIe,bddf,egih,cacf,eagb,idGh,gaic,fbeb,,|30",
+"4|gbic,bicf,igge,addb,gaef,iahh,cBfD,dahf,eehc,,|29",
+"4|bhee,~cdag,bedg,ffci,fdab,hebh,ciga,igha,dcfi,|32",
+"4|bcbi,ibhd,gaid,eagf,cbgh,afce,edhc,figa,dhfe,,|31",
+"4|abFc,hfae,dhcf,~dgai,ceah,cebb,hieg,fdbi,gdiG,,|32",
+"4|fghb,ehag,iecf,abdd,bGdi,hfie,ccai,#ifbEg,~adhc,,|33",
+"4|behb,hdgd,bada,caac,ffie,gdhg,cfii,ifgh,bcee,,|29",
+"4|ggba,bhbe,acda,idid,fcai,cefh,#hdffg,#ibgee,ichh,,|26",
+"4|~gehd,acge,bfdh,fbbC,haeb,gdhf,aadc,gfcE,,|26",
+"4|bcah,ffgb,effb,eigC,bgei,acic,hdig,Hdah,ddea,,|29",
+"4|gebf,igad,adhi,biga,ehef,bebh,ccdh,adcc,gffi,,|29",
+"4|~cibb,bdgh,caaf,fegf,ifag,ebci,~ddhd,#hieae,hcgh,,|29",
+"4|dhfb,gbda,ghcf,ieBh,fgcA,iddb,iehc,caag,efie,,,#a|29",
+"4|HBab,ffic,iafg,giad,cefc,hbcg,aigd,hehe,eddb,,|30",
+"4|chab,bbah,dgdi,idca,hcfe,~difb,gfhg,eiae,cefg,,|31",
+"4|decf,fahe,ebih,icad,fchi,abdi,cgdb,bgge,agfh,,|30",
+"4|fDeb,hbhd,aceg,bdga,ciih,eaif,aeid,fcgg,hcbF,,|30",
+"4|bifc,iffd,bhge,hfbg,iiaa,~dcag,Bhhe,ceag,decd,|28",
+"4|~egbg,dadc,adhg,afbh,hhbe,cgbe,cffa,edcf,,|26",
+"4|eeff,gcgf,ifad,cbbi,baih,hded,gcai,hacd,hebg,,|27",
+"4|ggfi,ieFc,aEdb,~ehba,hfac,gddf,bcde,aghh,iibc,,|29",
+"4|aadd,bgie,dEhb,agce,fhcf,ibcd,acgF,eiih,bhgf,,|29",
+"4|icbe,icha,fghd,icde,giba,adbd,gach,heef,ffbg,,,#g|29",
+"4|#dcihe,gghg,ifai,cfab,efbb,bged,fedd,hahc,~acdi,,|30",
+"4|igcb,dCbc,egij,aiab,faje,ffdd,aehi,fhBd,hgjc,jhge,,|32",
+"4|~fdGa,Jhid,baca,chgb,gbei,ehjd,fgce,jiha,fijd,fcbe,,|35",
+"4|bdba,jcha,ched,ajjc,hebf,dfgi,diag,egci,gffh,~eibj,,|35",
+"4|acic,ccfd,hihg,#ihdjg,eeae,#hjfjj,agdb,hbei,bgaf,bifd,,|32",
+"4|fidf,ghii,Cgcb,aeeg,cifb,ahhf,badb,Hcee,dgda,,|28",
+"4|hhag,dbef,fcge,aecb,icjB,~jiiH,agdj,#jhdfd,fabg,jcie,,|32",
+"4|dcid,hcfb,ejah,fjbb,ddah,feci,fbch,igeg,jjie,agag,,|34",
+"4|eghf,jcgf,jfhb,hcji,dfca,baei,ajeg,bdda,igcb,dhie,,|33",
+"4|fifc,~Abfj,adfg,acjg,gheb,iade,~hcid,gihj,jeeb,hcbd,|38",
+"4|gdaa,ccie,fgfe,cihb,iJff,eadh,dBhg,gcij,ajdj,bhbe,,|33",
+"4|aede,cdjf,bibe,fica,hbjj,bagh,cihj,afgg,hfei,cgdd,,|33",
+"4|#cgbif,gjjg,cdjb,ebie,fidd,gaae,hhca,jich,~dehc,abff,,|34",
+"4|gdhc,Hbdj,fgch,fcba,cihi,ibDg,eede,jfaa,jfbg,jeai,,|33",
+"4|gchg,gfib,#icfed,bihE,jhgb,#edfjj,jHce,caie,aaba,fddi,,|32",
+"4|dcde,ddii,~chfe,cgch,agbe,abfh,abff,iiea,bghg,,|28",
+"4|ccab,bgjj,jhhf,aigh,eaid,~jdbb,eicg,figf,efdc,hdae,,|33",
+"4|fgha,Cghd,iife,aefj,jjbe,ccbd,gegi,fdch,aiBj,bdah,,|32",
+"4|dejc,idjc,jeid,ggea,fbia,eaJh,~cBhf,bcah,bgdf,#aifhg,,|35",
+"4|ahgh,hbef,ebdf,aiba,ejgg,cied,agfi,jicc,#hdcjd,jhbf,,|33",
+"4|agef,hbeh,gdjg,fdja,chii,fjjf,cbdc,cbie,ibgd,aahe,,|33",
+"4|bjhe,cbiF,ciGi,bhac,gehf,deie,~gjaf,hfda,cdjd,ajbg,,|36",
+"4|iegc,fehj,iFbi,dhgj,jeac,gbda,gAdc,bdfc,hjhe,fbia,,|34",
+"4|cdja,ffie,hfja,ehej,hiec,~diaj,ggcb,bigf,badb,hcdg,,|37",
+"4|iaci,jegg,caia,hjdf,higj,~eegc,bdbd,ffje,afhb,dbch,|31"
+];/*LEVELS-END*/
+</script>
+<script>
+(() => {
+'use strict';
+const SAVE = 'neon-bolts-v1';
+const MODES = {
+  levels:{name:'Levels', desc:'Hand-checked puzzles with new twists along the way.'},
+  daily: {name:'Daily',  desc:'One new board every day, the same for everyone.'},
+  zen:   {name:'Zen',    desc:'Endless boards, free undo, no par. Just spin.', zen:true},
+};
+const MODE_IDS = Object.keys(MODES);
+let mode = 'levels', M = MODES.levels;
+const PLATFORM = window.PLATFORM || {name:'web'};
+const haptic = k => { try { if (PLATFORM.haptic) PLATFORM.haptic(k); } catch(e){} };
+// ten neon colours, picked to stay apart from each other
+const COLORS = ['#ff3df0', '#2ee6ff', '#ffec3d', '#2dff8f', '#ff7a2e', '#9b4dff', '#ff2e4f', '#3d6bff', '#f4f6ff', '#b4ff1a'];
+const $ = id => document.getElementById(id);
+const L_ = h => new THREE.Color(h).convertSRGBToLinear();
+const LIN = COLORS.map(L_);
+const { col:pcol, hgt:phgt } = CORE;
+const kindOf = k => k >= 109 ? 2 : k < 97 ? 1 : 0;   // 0 plain, 1 fuse nut, 2 fused double nut
+
+// ================= geometry constants =================
+const NUT_H = .27, NUT_R = .42, HOLE_R = .165, ROD_R = .11, BASE_H = .2, SPACING = 1.12, LIFT = .62, PITCH = .09;
+const rodLen = C => C * NUT_H + .34;
+
+// ================= renderer, camera, post =================
+const host = $('stage');
+const MOBILE = matchMedia('(pointer:coarse)').matches;
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
+const PR_MAX = Math.min(devicePixelRatio || 1, MOBILE ? 2.5 : 2), PR_MIN = Math.min(devicePixelRatio || 1, 1.25);
+let prNow = Math.min(PR_MAX, 2);
+renderer.setPixelRatio(prNow); renderer.toneMapping = THREE.NoToneMapping;
+host.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = L_(0x07051a);
+const camera = new THREE.PerspectiveCamera(30, 1, .3, 300);
+const camBase = new THREE.Vector3();
+const RTO = {format:THREE.RGBAFormat, type:THREE.HalfFloatType};
+const rt = renderer.capabilities.isWebGL2 ? Object.assign(new THREE.WebGLMultisampleRenderTarget(16, 16, RTO), {samples:MOBILE ? 2 : 4}) : new THREE.WebGLRenderTarget(16, 16, RTO);
+const composer = new THREE.EffectComposer(renderer, rt);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(256, 256), .55, .4, 1.05);
+composer.addPass(bloom);
+const bloomSetSize = bloom.setSize.bind(bloom); bloom.setSize = (w, h) => bloomSetSize(Math.round(w / 2), Math.round(h / 2));
+composer.addPass(new THREE.ShaderPass({
+  uniforms:{tDiffuse:{value:null}},
+  vertexShader:'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader:`uniform sampler2D tDiffuse; varying vec2 vUv;
+    vec3 aces(vec3 x){ return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
+    void main(){ vec3 c = aces(texture2D(tDiffuse, vUv).rgb * .92);
+      float l = dot(c, vec3(.2126, .7152, .0722)); c = clamp(mix(vec3(l), c, 1.3), 0., 1.);
+      c = mix(c * 12.92, 1.055 * pow(c, vec3(1. / 2.4)) - .055, step(.0031308, c));
+      vec2 d = vUv - .5; c *= 1. - dot(d, d) * .5; gl_FragColor = vec4(c, 1.); }`}));
+
+// chrome needs something to reflect: a little dark room lit by neon strips, baked once into a PMREM map
+const envMap = (() => {
+  const es = new THREE.Scene(); es.background = new THREE.Color(0x05030f);
+  const strip = (col, x, y, z, w, h, ry, rx) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({color:col, side:THREE.DoubleSide})); m.position.set(x, y, z); m.rotation.set(rx || 0, ry || 0, 0); es.add(m); };
+  strip(new THREE.Color(3, 3.2, 4), 0, 6, 0, 10, 3, 0, Math.PI / 2);
+  strip(new THREE.Color(2.4, .4, 2.2), -6, 1, -2, 1.2, 8, Math.PI / 2);
+  strip(new THREE.Color(.3, 1.8, 2.6), 6, 1, 2, 1.2, 8, -Math.PI / 2);
+  strip(new THREE.Color(1.2, .8, 2.6), 0, 0, -7, 9, 1, 0);
+  strip(new THREE.Color(.5, .3, 1.2), 0, -4, 0, 12, 12, 0, Math.PI / 2);
+  const pm = new THREE.PMREMGenerator(renderer); const t = pm.fromScene(es, .02).texture; pm.dispose(); return t;
+})();
+
+// ================= lights & backdrop =================
+const hemi = new THREE.HemisphereLight(L_(0xbfc8ff), L_(0x2a1050), .45); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, .9); key.position.set(-4, 8, 9); scene.add(key);
+const rim = new THREE.DirectionalLight(0xff4fd8, .5); rim.position.set(6, 3, -6); scene.add(rim);
+const glowTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.4, 'rgba(255,255,255,.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c); })();
+const nebula = [[0xff4fd8, -14, 8, -40, 34], [0x3d6bff, 15, -2, -44, 38], [0x2affc9, 0, -14, -50, 44]].map(([c, x, y, z, s]) => {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:c, transparent:true, opacity:.14, blending:THREE.AdditiveBlending, depthWrite:false}));
+  sp.position.set(x, y, z); sp.scale.setScalar(s); scene.add(sp); return sp; });
+{ const n = 700, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) pos.set([(Math.random() - .5) * 120, (Math.random() - .5) * 90 + 4, -25 - Math.random() * 40], i * 3);
+  const gm = new THREE.BufferGeometry(); gm.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(gm, new THREE.PointsMaterial({color:0xffffff, size:.16, transparent:true, opacity:.8}))); }
+const ZONES = [
+  {name:'Deep space', bg:0x07051a, neb:[0xff4fd8, 0x3d6bff, 0x2affc9], ground:0x2a1050, rim:0xff4fd8, accent:0x7a5cff, shelf:0x221a58},
+  {name:'Nebula',     bg:0x150420, neb:[0xff3d8b, 0xb026ff, 0xff8a3c], ground:0x3a0d3a, rim:0xff3d8b, accent:0xff3dbb, shelf:0x33144c},
+  {name:'Ocean',      bg:0x02101f, neb:[0x2ec4ff, 0x1d5bff, 0x2affc9], ground:0x062a3a, rim:0x2ec4ff, accent:0x1aa8ff, shelf:0x122650},
+  {name:'Aurora',     bg:0x031612, neb:[0x2affc9, 0x5cff7a, 0x2e8bff], ground:0x08331f, rim:0x2affc9, accent:0x2affa0, shelf:0x13343f},
+  {name:'Solar',      bg:0x1a0a02, neb:[0xffd84a, 0xff7a1f, 0xff3d3d], ground:0x3a1a05, rim:0xffb21f, accent:0xffb21f, shelf:0x40240d},
+];
+let zoneIdx = -1;
+const ZKEYS = ['bg', 'ground', 'rim', 'accent', 'shelf'];
+const zoneCur = {}, zoneTmp = new THREE.Color();
+for (const k of ['bg', 'ground', 'rim', 'accent', 'shelf']) zoneCur[k] = L_(ZONES[0][k]);
+zoneCur.neb = ZONES[0].neb.map(L_);
+const ZONE_LIN = ZONES.map(z => ({bg:L_(z.bg), ground:L_(z.ground), rim:L_(z.rim), accent:L_(z.accent), shelf:L_(z.shelf), neb:z.neb.map(L_)}));
+function zoneNow(){
+  if (mode === 'daily') return new Date().getDay() % 5;
+  if (M.zen) return Math.min(4, Math.floor(zenRun / 4));
+  return level >= 80 ? 4 : level >= 50 ? 3 : level >= 25 ? 2 : level >= 10 ? 1 : 0;
+}
+function checkZone(announce){ const i = zoneNow(); if (i === zoneIdx) return; const up = i > zoneIdx; zoneIdx = i; if (announce && up){ banner('You reached', ZONES[i].name); Sfx.zone(); } wake(1500); }
+function banner(small, big){ const el = document.createElement('div'); el.className = 'zone'; el.innerHTML = `<small>${small}</small>${big}`; document.body.appendChild(el); setTimeout(() => el.remove(), 2600); }
+function updateZone(dt){
+  const z = ZONE_LIN[Math.max(0, zoneIdx)], k = Math.min(1, dt * 1.2);
+  for (let i = 0; i < ZKEYS.length; i++) zoneCur[ZKEYS[i]].lerp(z[ZKEYS[i]], k);
+  for (let i = 0; i < 3; i++) zoneCur.neb[i].lerp(z.neb[i], k);
+  scene.background.copy(zoneCur.bg); hemi.groundColor.copy(zoneCur.ground); rim.color.copy(zoneCur.rim);
+  shelfMat.color.copy(zoneCur.shelf); shelfEdgeMat.color.copy(zoneCur.accent).multiplyScalar(1.7); backGlow.material.color.copy(zoneCur.accent);
+  for (let i = 0; i < 3; i++) nebula[i].material.color.copy(zoneCur.neb[i]); motesMat.color.copy(zoneCur.accent).multiplyScalar(2.2);
+  ringIdle.copy(zoneCur.accent).lerp(_white, .35).multiplyScalar(.32);
+}
+const MOTES = 120, mPos = new Float32Array(MOTES * 3), mSpd = new Float32Array(MOTES);
+for (let i = 0; i < MOTES; i++){ mPos.set([(Math.random() - .5) * 22, Math.random() * 14 - 5, -2 - Math.random() * 12], i * 3); mSpd[i] = .15 + Math.random() * .35; }
+const mGeo = new THREE.BufferGeometry(); mGeo.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+const motesMat = new THREE.PointsMaterial({map:glowTex, size:.2, transparent:true, opacity:.7, blending:THREE.AdditiveBlending, depthWrite:false});
+const motes = new THREE.Points(mGeo, motesMat); motes.frustumCulled = false; scene.add(motes);
+function updateMotes(dt){ const sp = 1 + Math.max(0, zoneIdx) * .3;
+  for (let i = 0; i < MOTES; i++){ let y = mPos[i * 3 + 1] + mSpd[i] * dt * sp; if (y > 9) y = -5; mPos[i * 3 + 1] = y; mPos[i * 3] += Math.sin(now / 1400 + i) * dt * .08; }
+  mGeo.attributes.position.needsUpdate = true; }
+
+// ================= materials & shared geometry =================
+// threads: one diagonal stripe per texture tile, so repeating it up the rod draws a helix
+const threadTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d'), im = x.createImageData(64, 64);
+  for (let y = 0; y < 64; y++) for (let xx = 0; xx < 64; xx++){ const v = .5 + .5 * Math.sin((y / 64 + xx / 64) * Math.PI * 2), g = Math.round(90 + 165 * Math.pow(v, .6)), o = (y * 64 + xx) * 4; im.data[o] = im.data[o + 1] = im.data[o + 2] = g; im.data[o + 3] = 255; }
+  x.putImageData(im, 0, 0); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t; })();
+const rodMatBase = new THREE.MeshStandardMaterial({color:L_(0xd8dcf0), metalness:1, roughness:.26, envMap, envMapIntensity:1.25, map:threadTex, bumpMap:threadTex, bumpScale:.015});
+const headMat = new THREE.MeshStandardMaterial({color:L_(0x6a6f90), metalness:1, roughness:.38, envMap, envMapIntensity:.8});
+const tipGeo = new THREE.SphereGeometry(ROD_R, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+const headGeo = new THREE.CylinderGeometry(.4, .43, BASE_H, 6); headGeo.translate(0, BASE_H / 2, 0);
+const washerGeo = new THREE.CylinderGeometry(.3, .3, .04, 24); washerGeo.translate(0, BASE_H + .02, 0);
+const ringGeo = new THREE.TorusGeometry(.5, .028, 8, 48); ringGeo.rotateX(Math.PI / 2);
+const collarGeo = new THREE.TorusGeometry(.22, .022, 6, 20, Math.PI * .5); collarGeo.rotateX(Math.PI / 2);
+const arrowGeo = new THREE.ConeGeometry(.045, .1, 8); arrowGeo.rotateZ(-Math.PI / 2);
+const capGeo = new THREE.CylinderGeometry(.24, .24, .2, 6); const domeGeo = new THREE.SphereGeometry(.17, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+const lockGeo = new THREE.TorusGeometry(.09, .025, 6, 18);
+const shelfMat = new THREE.MeshStandardMaterial({color:L_(0x221a58), roughness:.45, metalness:.4, envMap, envMapIntensity:.4});
+const shelfEdgeMat = new THREE.MeshBasicMaterial({color:L_(0x7a5cff)});
+const ringIdle = L_(0x7a5cff).multiplyScalar(.32), _white = new THREE.Color(1, 1, 1);
+const backGlow = new THREE.Sprite(new THREE.SpriteMaterial({map:glowTex, color:L_(0x7a5cff), transparent:true, opacity:.22, blending:THREE.AdditiveBlending, depthWrite:false}));
+backGlow.position.set(0, 1.5, -5); backGlow.scale.set(16, 12, 1); scene.add(backGlow);
+const beamTex = (() => { const c = document.createElement('canvas'); c.width = 32; c.height = 128; const x = c.getContext('2d');
+  const gx = x.createLinearGradient(0, 0, 32, 0); gx.addColorStop(0, 'rgba(255,255,255,0)'); gx.addColorStop(.5, 'rgba(255,255,255,1)'); gx.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gx; x.fillRect(0, 0, 32, 128); x.globalCompositeOperation = 'destination-in';
+  const gy = x.createLinearGradient(0, 0, 0, 128); gy.addColorStop(0, 'rgba(0,0,0,0)'); gy.addColorStop(.6, 'rgba(0,0,0,.8)'); gy.addColorStop(1, 'rgba(0,0,0,1)'); x.fillStyle = gy; x.fillRect(0, 0, 32, 128);
+  return new THREE.CanvasTexture(c); })();
+
+// hex nuts: an extruded hexagon with a round hole. The neon look comes from the shader: an inset ring on both faces,
+// lit outer edges and a glowing bore; fuse nuts get a flickering band round the middle, double nuts a bright seam.
+const APO = NUT_R * .8660254;
+function nutGeometry(h){
+  const s = new THREE.Shape(); for (let k = 0; k < 6; k++){ const a = k * Math.PI / 3; k ? s.lineTo(Math.cos(a) * NUT_R, Math.sin(a) * NUT_R) : s.moveTo(Math.cos(a) * NUT_R, Math.sin(a) * NUT_R); } s.closePath();
+  const hole = new THREE.Path(); hole.absarc(0, 0, HOLE_R, 0, Math.PI * 2, true); s.holes.push(hole);
+  const g = new THREE.ExtrudeGeometry(s, {depth:h - .06, bevelEnabled:true, bevelThickness:.03, bevelSize:.025, bevelSegments:2, curveSegments:28});
+  g.rotateX(Math.PI / 2); g.center(); g.computeVertexNormals(); return g;
+}
+const TIME = {value:0};
+function nutMaterial(half){
+  const m = new THREE.MeshStandardMaterial({color:new THREE.Color(.1, .1, .12), metalness:.5, roughness:.18, envMap, envMapIntensity:.8});
+  m.onBeforeCompile = sh => {
+    sh.uniforms.uTime = TIME; sh.uniforms.uHalf = {value:half};
+    sh.vertexShader = 'attribute vec3 aFx;\nvarying vec3 vLoc;\nvarying vec3 vFx;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vLoc = position; vFx = aFx;');
+    sh.fragmentShader = 'varying vec3 vLoc;\nvarying vec3 vFx;\nuniform float uTime;\nuniform float uHalf;\n' + sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      float r = length(vLoc.xz);
+      vec2 q = abs(vLoc.xz); float hx = max(q.y, q.x * .8660254 + q.y * .5);
+      float face = smoothstep(uHalf - .04, uHalf - .005, abs(vLoc.y));
+      float lip = smoothstep(uHalf - .06, uHalf - .02, abs(vLoc.y));
+      float ang = atan(vLoc.z, vLoc.x);
+      float cd = abs(fract(ang / 1.0471976 + .5) - .5) * 1.0471976 * r;
+      float corner = (1. - smoothstep(.012, .04, cd)) * smoothstep(${(APO - .04).toFixed(3)}, ${(APO).toFixed(3)}, hx);
+      float ring = 1. - smoothstep(.012, .03, abs(r - .29));
+      float dash = vFx.z < .5 ? 1. : mix(.2, 1., step(.32, fract((ang / 6.2832 + .5) * (vFx.z + 2.))));
+      float rim = smoothstep(${(APO - .045).toFixed(3)}, ${(APO + .015).toFixed(3)}, hx);
+      float bore = 1. - smoothstep(${(HOLE_R + .004).toFixed(3)}, ${(HOLE_R + .05).toFixed(3)}, r);
+      float fill = clamp(vFx.x - 1., 0., 1.);
+      float lit = min(vFx.x, 1.6);
+      float body = mix(.2, .95, fill) + (1. - face) * .12;
+      float lines = ring * face * 2.2 * dash + rim * lip * 2.4 + corner * 1.6 + bore * .9;
+      vec3 em = vColor * (body * min(vFx.x, 1.) + lines * lit);
+      if (vFx.y > .5 && vFx.y < 1.5){ float band = (1. - smoothstep(.0, .028, abs(vLoc.y))) * (1. - face); em += mix(vColor, vec3(1.), .6) * band * (2.6 + sin(uTime * 13. + vLoc.x * 25.) * 1.) * lit; }
+      if (vFx.y > 1.5){ float seam = (1. - smoothstep(.0, .02, abs(vLoc.y))) * (1. - face); em += mix(vColor, vec3(1.), .4) * seam * 2. * lit; }
+      totalEmissiveRadiance += em;`);
+  };
+  return m;
+}
+const MAXN = 64;
+const geoS = nutGeometry(NUT_H - .025), geoD = nutGeometry(NUT_H * 2 - .025);
+const fxS = new Float32Array(MAXN * 3), fxD = new Float32Array(MAXN * 3);
+geoS.setAttribute('aFx', new THREE.InstancedBufferAttribute(fxS, 3)); geoD.setAttribute('aFx', new THREE.InstancedBufferAttribute(fxD, 3));
+const meshS = new THREE.InstancedMesh(geoS, nutMaterial((NUT_H - .025) / 2), MAXN), meshD = new THREE.InstancedMesh(geoD, nutMaterial((NUT_H * 2 - .025) / 2), MAXN);
+for (const m of [meshS, meshD]){ m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; for (let i = 0; i < MAXN; i++) m.setColorAt(i, new THREE.Color(1, 1, 1)); m.count = 0; }
+const world = new THREE.Group(); scene.add(world);
+world.add(meshS, meshD);
+
+// ================= particles, waves, floating text =================
+const PMAX = 900, pPos = new Float32Array(PMAX * 3), pCol = new Float32Array(PMAX * 3), parts = [];
+for (let i = 0; i < PMAX; i++) parts.push({life:0, x:0, y:0, z:0, vx:0, vy:0, vz:0, decay:1, r:0, g:0, b:0, grav:0});
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3)); pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const points = new THREE.Points(pGeo, new THREE.PointsMaterial({size:.16, map:glowTex, vertexColors:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending}));
+points.frustumCulled = false; scene.add(points);
+let pNext = 0, pAlive = 0;
+function emit(x, y, z, n, c, spd, up = 1, grav = 6, decay = 1.3, mul = 3){
+  for (let i = 0; i < n; i++){ const q = parts[pNext]; pNext = (pNext + 1) % PMAX;
+    const a = Math.random() * Math.PI * 2, s = (Math.random() * .7 + .3) * spd;
+    q.x = x; q.y = y; q.z = z; q.vx = Math.cos(a) * s; q.vy = (Math.random() * .8 + .2) * spd * up; q.vz = Math.sin(a) * s * .6;
+    q.life = 1; q.decay = decay * (.7 + Math.random() * .6); q.r = c.r * mul; q.g = c.g * mul; q.b = c.b * mul; q.grav = grav; }
+  pAlive = Math.max(pAlive, 1);
+}
+const WAVES = [], waveGeo = new THREE.TorusGeometry(1, .03, 6, 48); waveGeo.rotateX(Math.PI / 2);
+for (let i = 0; i < 8; i++){ const m = new THREE.Mesh(waveGeo, new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending})); m.visible = false; world.add(m); WAVES.push({m, life:0, y0:0, y1:0, s0:.4, s1:1}); }
+let waveNext = 0;
+function wave(x, y0, z, y1, c, s0 = .45, s1 = .9, mul = 3){ const w = WAVES[waveNext]; waveNext = (waveNext + 1) % WAVES.length;
+  w.m.position.set(x, y0, z); w.m.visible = true; w.life = 1; w.y0 = y0; w.y1 = y1; w.s0 = s0; w.s1 = s1; w.m.material.color.copy(c).multiplyScalar(mul); w.m.material.opacity = 1; }
+const fxLayer = $('fx'), texts = [], proj = new THREE.Vector3();
+function floatText(s, x, y, z, color, size, big){
+  const el = document.createElement('div'); el.className = 'ft'; el.textContent = s;
+  el.style.cssText += `;font-size:${size}px;color:#fff;text-shadow:0 0 6px ${color},0 0 16px ${color},0 0 30px ${color},0 3px 0 rgba(0,0,0,.45)`;
+  fxLayer.appendChild(el); texts.push({el, x, y, z, life:1, big}); wake(1500);
+}
+const hexOf = c => '#' + c.clone().convertLinearToSRGB().getHexString();
+
+// ================= level state =================
+let selTargets = [], LV = null, S = [], IDS = [], nuts = [], bolts = [], history = [], level = 1, moves = 0, sel = -1, lifted = [], usedExtra = false, undos = 3, startS = null, startIds = null;
+let hintMove = -1, groupsPending = 0, finished = false, stuckShown = false, boltsDirty = false;
+function levelDef(L){
+  if (L <= LEVELS.length) return CORE.decode(LEVELS[L - 1]);
+  // past the hand-picked list: fresh boards from the hardest band, still checked by the solver
+  return CORE.generate(L * 7919 + 13, Object.assign({}, lateSpec(L), {tries:24, cap:30000})) || CORE.generate(L, {K:7, C:4, E:2, tries:40, cap:30000});
+}
+const lateSpec = L => ({K:9 + (L % 2), C:4, E:2, turn:L % 3 ? 1 : 0, fuse:L % 4 ? 1 : 2, caps:L % 5 === 0 ? 1 : 0, target:36});
+function dailyDef(){
+  const seed = todaySeed();
+  return CORE.generate(seed * 31 + 7, {K:7, C:4, E:2, turn:1, fuse:1, caps:1, target:26, tol:3, tries:30, cap:30000}) ||
+         CORE.generate(seed * 31 + 8, {K:7, C:4, E:2, turn:1, fuse:1, tries:40, cap:30000});
+}
+function zenDef(n){
+  const R = CORE.rng(Math.floor(Math.random() * 1e9)), K = Math.min(8, 4 + Math.floor(n / 3));
+  const sp = {K, C:4, E:2, turn:n > 2 && R() < .45 ? 1 : 0, fuse:n > 4 && R() < .5 ? 1 : 0, caps:n > 6 && R() < .3 ? 1 : 0, tries:20, cap:25000};
+  return CORE.generate(Math.floor(R() * 1e9), sp) || CORE.generate(Math.floor(R() * 1e9), {K:Math.min(K, 6), C:4, E:2, tries:40, cap:30000});
+}
+
+// ================= board building =================
+function disposeBolts(){ for (const b of bolts){ world.remove(b.g); b.rodMat.dispose(); b.ringMat.dispose(); b.beam.material.dispose(); if (b.capMat) b.capMat.dispose(); if (b.collarMat) b.collarMat.dispose(); b.rod.geometry.dispose(); } bolts = []; for (const s of shelves){ world.remove(s); s.geometry.dispose(); } shelves = []; }
+let shelves = [], rowsInfo = {rows:1, counts:[1], rowH:0};
+// rows: pick 1, 2 or 3 shelves, whichever lets the nuts be drawn largest on this screen
+function chooseRows(n){
+  const rowH = BASE_H + rodLen(LV.C) + 1.0, aw = innerWidth * .95, ah = Math.max(200, innerHeight - 300 * uiZoom);
+  let best = 1, bs = 0;
+  for (let r = 1; r <= 3; r++){ if (r > 1 && n < r * 2) break; const per = Math.ceil(n / r), sc = Math.min(88 * uiZoom, aw / (per * SPACING + .4), ah / (r * rowH - .3)); if (sc > bs * 1.1){ bs = sc; best = r; } }
+  const counts = []; let left = n; for (let r = 0; r < best; r++){ const c = Math.ceil(left / (best - r)); counts.push(c); left -= c; }
+  return {rows:best, counts, rowH};
+}
+function layoutPos(i){
+  const {rows, counts, rowH} = rowsInfo; let r = 0, k = i; while (k >= counts[r]){ k -= counts[r]; r++; }
+  const up = rows - 1 - r;
+  return {x:(k - (counts[r] - 1) / 2) * SPACING, y:up * rowH, z:-up * .9};
+}
+function makeBolt(i){
+  const g = new THREE.Group(), len = rodLen(LV.C);
+  const rodGeo = new THREE.CylinderGeometry(ROD_R, ROD_R, len, 20, 1, true); rodGeo.translate(0, BASE_H + len / 2, 0);
+  const rodMat = rodMatBase.clone(); rodMat.map = threadTex; rodMat.bumpMap = threadTex;
+  const rod = new THREE.Mesh(rodGeo, rodMat); g.add(rod);
+  const tip = new THREE.Mesh(tipGeo, rodMat); tip.position.y = BASE_H + len; g.add(tip);
+  const head = new THREE.Mesh(headGeo, headMat); g.add(head);
+  const washer = new THREE.Mesh(washerGeo, headMat); g.add(washer);
+  const ringMat = new THREE.MeshBasicMaterial({color:ringIdle.clone()}); const ring = new THREE.Mesh(ringGeo, ringMat); ring.position.y = .03; g.add(ring);
+  const beam = new THREE.Sprite(new THREE.SpriteMaterial({map:beamTex, color:0xffffff, transparent:true, opacity:0, blending:THREE.AdditiveBlending, depthWrite:false}));
+  beam.center.set(.5, 0); beam.position.y = BASE_H; beam.scale.set(1.1, len + 1.4, 1); g.add(beam);
+  const b = {g, rod, rodMat, ringMat, ring, beam, len, done:false, lockedShown:false, ringCol:ringIdle.clone(), pulse0:0, x:0, y:0, z:0, shakeT:-1, spin:0, spinV:.6, capT:-1};
+  if (LV.turn[i]){
+    // a turn bolt wears a ring of three arrows just above its head that keep circling
+    b.collarMat = new THREE.MeshBasicMaterial({color:new THREE.Color(.5, 2.6, 3.2)});
+    const collar = new THREE.Group(); collar.position.y = BASE_H + .1;
+    for (let k = 0; k < 3; k++){ const a = new THREE.Group(); a.rotation.y = k * Math.PI * 2 / 3;
+      a.add(new THREE.Mesh(collarGeo, b.collarMat)); const tip = new THREE.Mesh(arrowGeo, b.collarMat); const ang = Math.PI * .5; tip.position.set(Math.cos(ang) * .22, 0, -Math.sin(ang) * .22); tip.rotation.y = ang + Math.PI / 2; a.add(tip); collar.add(a); }
+    collar.scale.setScalar(2.55); collar.position.y = .06; g.add(collar); b.collar = collar;
+  }
+  if (LV.cap[i] >= 0){
+    const c = LIN[LV.cap[i]]; b.capMat = new THREE.MeshStandardMaterial({color:c.clone().multiplyScalar(.3), emissive:c, emissiveIntensity:1.6, metalness:.4, roughness:.3, envMap});
+    const cap = new THREE.Group(); const cm = new THREE.Mesh(capGeo, b.capMat); cap.add(cm); const dome = new THREE.Mesh(domeGeo, b.capMat); dome.position.y = .1; cap.add(dome);
+    const lk = new THREE.Mesh(lockGeo, b.capMat); lk.position.set(0, .32, 0); cap.add(lk);
+    cap.position.y = BASE_H + len + .02; g.add(cap); b.cap = cap; b.capY = cap.position.y;
+  }
+  return b;
+}
+function buildBoard(){
+  disposeBolts();
+  const n = S.length;
+  for (let i = 0; i < n; i++){ const b = makeBolt(i); bolts.push(b); world.add(b.g); }
+  placeBolts();
+  // nuts: one object per nut for the whole level (merged nuts just hide), drawn by two instanced meshes
+  nuts = []; IDS = S.map(() => []);
+  S.forEach((s, bi) => { for (let p = 0; p < s.length; p++){ const k = s.charCodeAt(p), id = nuts.length;
+    nuts.push({id, c:pcol(k), kind:kindOf(k), vis:true, x:0, y:0, z:0, rot:Math.random() * 6, glow:1, b:bi, lifted:false, path:null, si:0, onEnd:null, pop:0});
+    IDS[bi].push(id); } });
+  meshS.count = meshD.count = nuts.length;
+  nuts.forEach(n => { meshS.setColorAt(n.id, LIN[n.c]); meshD.setColorAt(n.id, LIN[n.c]); });
+  meshS.instanceColor.needsUpdate = meshD.instanceColor.needsUpdate = true;
+  snapAll(); refreshBolts(false); resize();
+  // drop-in: every nut falls onto its bolt, row by row
+  for (const n of nuts){ const t = slotOf(n.id); n.y = t.y + 3 + Math.random(); setPath(n, [seg(t.x, t.y, t.z, .45 + Math.random() * .2, 'out', 0, Math.PI * 2)], null, 60 * n.b + 20 * (n.y % 1)); }
+  wake(1500);
+}
+function placeBolts(){
+  const n = S.length; rowsInfo = chooseRows(n);
+  for (let i = 0; i < n; i++){ const p = layoutPos(i), b = bolts[i]; b.x = p.x; b.y = p.y; b.z = p.z; b.top = p.y + BASE_H + b.len; b.g.position.set(p.x, p.y, p.z); }
+  for (const s of shelves){ world.remove(s); s.geometry.dispose(); } shelves = [];
+  rowsInfo.counts.forEach((cnt, r) => {
+    const up = rowsInfo.rows - 1 - r, w = cnt * SPACING + .3, y = up * rowsInfo.rowH, z = -up * .9;
+    const slab = new THREE.Mesh(new THREE.RoundedBoxGeometry(w, .16, 1.2, 3, .06), shelfMat); slab.position.set(0, y - .08, z); world.add(slab); shelves.push(slab);
+    const edge = new THREE.Mesh(new THREE.BoxGeometry(w - .1, .025, .025), shelfEdgeMat); edge.position.set(0, y - .02, z + .6); world.add(edge); shelves.push(edge);
+  });
+}
+// where nut `id` sits right now on its bolt
+const _slot = {x:0, y:0, z:0};
+function slotOf(id){
+  const n = nuts[id], b = bolts[n.b], ids = IDS[n.b]; let h = 0;
+  for (const o of ids){ if (o === id) break; h += nuts[o].kind === 2 ? 2 : 1; }
+  _slot.x = b.x; _slot.z = b.z; _slot.y = b.y + BASE_H + .04 + (h + (n.kind === 2 ? 1 : .5)) * NUT_H; return _slot;
+}
+function reindex(){ IDS.forEach((ids, bi) => ids.forEach(id => { nuts[id].b = bi; })); }
+function snapAll(){ reindex(); for (const n of nuts){ n.path = null; n.onEnd = null; n.lifted = false; if (!n.vis) continue; const t = slotOf(n.id); n.x = t.x; n.y = t.y; n.z = t.z; } }
+
+// ================= nut motion: short segment paths, filled in when created (no per-frame allocation) =================
+const seg = (x, y, z, dur, ease, arc, spin, trail) => ({x, y, z, dur, ease, arc:arc || 0, spin:spin || 0, trail:!!trail, t0:0, x0:0, y0:0, z0:0, r0:0});
+const EASE = {lin:k => k, out:k => 1 - Math.pow(1 - k, 3), inout:k => k * k * (3 - 2 * k), in:k => k * k, back:k => 1 + 2.2 * Math.pow(k - 1, 3) + 1.2 * Math.pow(k - 1, 2)};
+function setPath(n, segs, onEnd, delay = 0){
+  if (n.onEnd){ const cb = n.onEnd; n.onEnd = null; cb(n); }   // a nut that gets new orders counts as having arrived
+  const t = performance.now() + delay; let px = n.x, py = n.y, pz = n.z;
+  for (const s of segs){ s.x0 = px; s.y0 = py; s.z0 = pz; px = s.x; py = s.y; pz = s.z; }
+  segs[0].t0 = t; segs[0].r0 = n.rot; n.path = segs; n.si = 0; n.onEnd = onEnd; wake(200);
+}
+function stepPath(n){
+  const s = n.path[n.si]; let k = (now - s.t0) / (s.dur * 1000);
+  if (k < 0) return;
+  if (k >= 1) k = 1;
+  const e = EASE[s.ease](k);
+  n.x = s.x0 + (s.x - s.x0) * e; n.y = s.y0 + (s.y - s.y0) * e + Math.sin(Math.PI * k) * s.arc; n.z = s.z0 + (s.z - s.z0) * e; n.rot = s.r0 + s.spin * e;
+  if (s.trail && k < 1){ const c = LIN[n.c]; for (let t = 0; t < 2; t++){ const a = n.rot + t * Math.PI; emit(n.x + Math.cos(a) * NUT_R, n.y, n.z + Math.sin(a) * NUT_R, 1, c, .04, 0, 0, 1.5, 2.6); } }
+  if (k >= 1){
+    n.si++;
+    if (n.si >= n.path.length){ n.path = null; const cb = n.onEnd; n.onEnd = null; if (cb) cb(n); }
+    else { const nx = n.path[n.si]; nx.t0 = s.t0 + s.dur * 1000; nx.r0 = n.rot; }
+  }
+}
+// a group of nuts moving together; when the last one lands the bolt is judged
+function group(ids, done){ const g = {left:ids.length, done}; groupsPending++; return () => { if (--g.left === 0){ groupsPending--; done(); } }; }
+
+// ================= bolt visuals =================
+function refreshBolts(animate){
+  const m = CORE.unlockedMask(LV, S);
+  bolts.forEach((b, i) => {
+    const done = CORE.complete(LV, S[i]) && !IDS[i].some(id => nuts[id].path), locked = CORE.locked(LV, i, m);
+    if (done && !b.done){ b.done = true; b.doneC = pcol(S[i].charCodeAt(0)); b.pulse0 = now; if (animate) completeFx(i); }
+    else if (!done && b.done) b.done = false;
+    if (b.cap){
+      if (!locked && !b.unlocked){ b.unlocked = true; if (animate) unlockFx(i); else b.cap.visible = false; }
+      else if (locked && b.unlocked){ b.unlocked = false; b.cap.visible = true; b.capT = -1; b.cap.position.y = b.capY; b.cap.scale.setScalar(1); b.cap.rotation.y = 0; }
+    }
+  });
+}
+function completeFx(i){
+  const b = bolts[i], c = LIN[b.doneC];
+  wave(b.x, b.y + .1, b.z, b.top + .3, c, .5, .75, 3.2);
+  setTimeout(() => wave(b.x, b.y + .1, b.z, b.top + .5, c, .45, 1.1, 2), 140);
+  emit(b.x, b.top, b.z, 40, c, 2.4, 1.2, 5, 1.1);
+  floatText('Lit', b.x, b.top + .5, b.z, hexOf(c), 20);
+  Sfx.complete(b.doneC); haptic('success'); shake = Math.max(shake, .05); wake(1800);
+}
+function unlockFx(i){
+  const b = bolts[i], c = LIN[LV.cap[i]]; b.capT = now;
+  emit(b.x, b.top + .15, b.z, 36, c, 2.2, 1.4, 4); wave(b.x, b.top, b.z, b.top + .2, c, .3, .9, 3);
+  floatText('Unlocked', b.x, b.top + .7, b.z, hexOf(c), 20); Sfx.unlock(); haptic('medium'); wake(1500);
+}
+
+// ================= moves =================
+const liftedIds = i => { const ids = IDS[i], n = CORE.topRun(S[i]); return ids.slice(ids.length - n); };
+function liftY(i, idsUp){ // hover spot for each lifted nut: up the thread and a little past the tip if needed
+  const b = bolts[i]; return idsUp.map(id => slotOf(id).y + LIFT);
+}
+function lift(i){
+  sel = i; lifted = liftedIds(i); selTargets = legalTargets(i); const ys = liftY(i, lifted);
+  lifted.forEach((id, k) => { const n = nuts[id]; n.lifted = true; setPath(n, [seg(bolts[i].x, ys[k], bolts[i].z, .2, 'out', 0, Math.PI * 1.5)], null, k * 18); });
+  Sfx.lift(lifted.length); haptic('light'); hideHint(); wake(400);
+  setHintText(LV.turn[i] && CORE.canTurn(LV, S, i) ? 'Tap it again to turn the bolt' : 'Now tap a bolt to screw them on');
+}
+function dropBack(){
+  if (sel < 0) return; const i = sel;
+  lifted.forEach((id, k) => { const n = nuts[id]; n.lifted = false; const t = slotOf(id); setPath(n, [seg(t.x, t.y, t.z, .22, 'inout', 0, -Math.PI * 1.5)], null, k * 12); });
+  sel = -1; lifted = []; Sfx.drop(); setHintText(''); wake(400);
+}
+function snapshot(){ return {S:S.slice(), IDS:IDS.map(a => a.slice()), kinds:nuts.map(n => n.kind), vis:nuts.map(n => n.vis), moves}; }
+function pour(i, j){
+  const mv = i << 5 | j, ev = {};
+  history.push(snapshot());
+  const ns = CORE.apply(LV, S, mv, ev), k = ev.k;
+  const moved = IDS[i].slice(IDS[i].length - k), stay = lifted.filter(id => moved.indexOf(id) < 0);
+  // nuts that did not fit settle back down
+  IDS[i] = IDS[i].slice(0, IDS[i].length - k);
+  stay.forEach(id => { const n = nuts[id]; n.lifted = false; });
+  // the logic first: merges in the order the rules made them
+  let newIds = IDS[j].concat(moved); const merges = [];
+  for (const idx of ev.fuse){ merges.push([newIds[idx], newIds[idx + 1]]); newIds.splice(idx + 1, 1); }
+  // the merged pair keeps both slots until it lands, so lay out with the old kinds first
+  IDS[j] = IDS[j].concat(moved); S = ns; reindex();
+  const bi = bolts[i], bj = bolts[j], travel = Math.max(bi.top, bj.top) + .5;
+  stay.forEach(id => { const n = nuts[id], t = slotOf(id); setPath(n, [seg(t.x, t.y, t.z, .22, 'inout', 0, -Math.PI)], null); });
+  const done = group(moved, () => landed(j, merges));
+  let off = 0;
+  moved.forEach((id, m) => {
+    const n = nuts[id], t = slotOf(id), y0 = travel + off, dist = Math.hypot(bj.x - bi.x, bj.y - bi.y), down = y0 - t.y;
+    off += (n.kind === 2 ? 2 : 1) * NUT_H; n.lifted = false;
+    setPath(n, [seg(bi.x, y0, bi.z, .12 + Math.max(0, y0 - n.y) * .08, 'out', 0, Math.PI * .6),
+                seg(bj.x, y0, bj.z, .16 + dist * .045, 'inout', .18 + dist * .05, Math.PI * .4),
+                seg(t.x, t.y, t.z, .2 + down * .16, 'out', 0, -down / PITCH * .5, true)], () => { done(); Sfx.click(); });
+  });
+  IDS[j] = newIds; reindex();   // logical order from now on (positions above were computed before the merge)
+  sel = -1; lifted = []; moves++; hintClear(); paintStats(); setHintText('');
+  Sfx.screw(k); haptic('light'); wake(1200);
+}
+function turn(i){
+  history.push(snapshot());
+  const ev = {}, ns = CORE.apply(LV, S, 1024 | i, ev);
+  lifted.forEach(id => { nuts[id].lifted = false; }); sel = -1; lifted = [];
+  const old = IDS[i], bottom = old[0]; let newIds = old.slice(1).concat(bottom);
+  const merges = []; IDS[i] = newIds.slice(); S = ns; reindex();
+  for (const idx of ev.fuse){ merges.push([newIds[idx], newIds[idx + 1]]); newIds.splice(idx + 1, 1); }
+  const b = bolts[i], done = group(old, () => landed(i, merges));
+  old.forEach(id => { const n = nuts[id], t = slotOf(id);
+    if (id === bottom){ const side = b.x + (b.x > 0 ? -.8 : .8);
+      setPath(n, [seg(side, n.y + .05, b.z + .3, .16, 'out', 0, Math.PI), seg(side, t.y, b.z + .3, .28, 'inout', 0, Math.PI * 2, true), seg(t.x, t.y, t.z, .16, 'in', 0, Math.PI)], done); }
+    else setPath(n, [seg(t.x, t.y, t.z, .32, 'inout', 0, -Math.PI * 1.2)], done, 80);
+  });
+  IDS[i] = newIds; reindex();
+  b.spinV = 14; moves++; hintClear(); paintStats(); setHintText(''); Sfx.turn(); haptic('medium'); wake(1200);
+}
+// a move has landed: fuse pairs melt together, full bolts light up, caps fly off, and the board is judged
+function landed(j, merges){
+  for (const [lo, up] of merges){
+    const a = nuts[lo], b = nuts[up]; b.vis = false; a.kind = 2; a.pop = now;
+    const c = LIN[a.c]; emit(a.x, a.y, a.z, 26, c, 1.6, .8, 2); wave(a.x, a.y, a.z, a.y, c, .3, .8, 4);
+    floatText('Fused', a.x, a.y + .5, a.z, hexOf(c), 18); Sfx.fuse(); haptic('medium');
+  }
+  if (merges.length){ reindex(); for (const id of IDS[j]){ const n = nuts[id]; if (!n.path){ const t = slotOf(id); setPath(n, [seg(t.x, t.y, t.z, .12, 'out')], null); } } }
+  refreshBolts(true); boltsDirty = true;
+  judge();
+}
+function judge(){
+  if (finished || groupsPending) return;
+  if (CORE.solved(LV, S)){ finished = true; setTimeout(win, 450); return; }
+  if (!CORE.moves(LV, S).length && !stuckShown){ stuckShown = true; setTimeout(showStuck, 500); }
+}
+function legalTargets(i){ const m = CORE.unlockedMask(LV, S), out = []; for (let j = 0; j < S.length; j++) if (CORE.canPour(LV, S, i, j, m)) out.push(j); return out; }
+function tapBolt(j){
+  if (!playing()) return;
+  Sfx.unlock_(); const m = CORE.unlockedMask(LV, S);
+  if (sel < 0){
+    if (CORE.canLift(LV, S, j, m)) lift(j);
+    else nope(j, CORE.locked(LV, j, m) ? 'Capped until ' + colorName(LV.cap[j]) + ' is done' : '');
+    return;
+  }
+  if (j === sel){ if (CORE.canTurn(LV, S, j, m)) turn(j); else dropBack(); return; }
+  if (CORE.canPour(LV, S, sel, j, m)){ pour(sel, j); return; }
+  if (CORE.canLift(LV, S, j, m)){ dropBack(); lift(j); return; }
+  nope(j, CORE.locked(LV, j, m) ? 'Capped until ' + colorName(LV.cap[j]) + ' is done' : '');
+}
+const COLOR_NAMES = ['pink', 'cyan', 'yellow', 'green', 'orange', 'violet', 'red', 'blue', 'white', 'lime'];
+const colorName = c => COLOR_NAMES[c];
+function nope(j, msg){ const b = bolts[j]; if (b) b.shakeT = now; Sfx.nope(); haptic('light'); if (msg) NEON.toast(msg); wake(500); }
+function undo(){
+  if (!history.length || finished) return;
+  if (!M.zen && undos <= 0){ NEON.toast('No undos left'); if (PLATFORM.onNoHints) PLATFORM.onNoHints('undo'); return; }
+  if (!M.zen){ undos--; }
+  restore(history.pop()); Sfx.undo(); paintStats();
+}
+function restore(h){
+  for (const n of nuts){ n.path = null; n.onEnd = null; }
+  groupsPending = 0;
+  S = h.S.slice(); IDS = h.IDS.map(a => a.slice());
+  while (S.length < bolts.length){ S.push(''); IDS.push([]); }
+  nuts.forEach((n, i) => { n.kind = h.kinds[i]; n.vis = h.vis[i]; n.lifted = false; });
+  moves = h.moves; sel = -1; lifted = []; stuckShown = false; reindex();
+  for (const n of nuts){ if (!n.vis) continue; const t = slotOf(n.id); setPath(n, [seg(t.x, t.y, t.z, .2, 'inout', 0, -Math.PI)], null); }
+  refreshBolts(false); hintClear(); $('overlay').hidden = true; setHintText('');
+}
+function restart(){
+  if (finished) return;
+  const extra = bolts.length - startS.length;
+  restore({S:startS.concat(Array(extra).fill('')), IDS:startIds.map(a => a.slice()).concat(Array.from({length:extra}, () => [])), kinds:startKinds, vis:nuts.map(() => true), moves:0});
+  history = []; if (!M.zen) undos = 3; Sfx.undo(); paintStats();
+}
+function addBolt(){
+  if (finished || !playing() && $('overlay').hidden) return;
+  if (usedExtra){ NEON.toast('One extra bolt per level'); return; }
+  if (store.bolts <= 0){ NEON.toast('No extra bolts left'); if (PLATFORM.onNoHints) PLATFORM.onNoHints('bolt'); return; }
+  if (S.length >= 14){ NEON.toast('No room for another bolt'); return; }
+  dropBack(); store.bolts--; usedExtra = true; persist();
+  LV.b.push(''); LV.turn.push(0); LV.cap.push(-1); S.push(''); IDS.push([]);
+  for (const h of history){ h.S.push(''); h.IDS.push([]); }
+  const b = makeBolt(S.length - 1); bolts.push(b); world.add(b.g); b.popT = now;
+  placeBolts(); resize();
+  reindex(); for (const n of nuts){ if (!n.vis) continue; const t = slotOf(n.id); setPath(n, [seg(t.x, t.y, t.z, .3, 'inout', 0, 0)], null); }
+  $('overlay').hidden = true; stuckShown = false; emit(b.x, b.y + .4, b.z, 30, L_(0x7af7ff), 2, 1, 4);
+  Sfx.bolt(); haptic('medium'); paintStats(); wake(1200);
+}
+
+// ================= hints =================
+let hints = 3;
+function hint(){
+  if (!playing() || !LV) return;
+  if (hints <= 0){ NEON.toast('Out of hints'); if (PLATFORM.onNoHints) PLATFORM.onNoHints('hint'); return; }
+  const base = sel >= 0 ? S : S;
+  const res = CORE.solve(LV, base, {w:1.6, cap:40000});
+  if (!res || !res.path || !res.path.length){ NEON.toast(res && !res.path ? 'No way out from here. Undo or restart' : 'Try an undo first'); return; }
+  hints--; persist(); paintStats(); Sfx.hint();
+  const mv = res.path[0];
+  if (sel >= 0 && (mv & 1024 ? (mv & 31) !== sel : (mv >> 5) !== sel)) dropBack();
+  hintMove = mv; paintHintArrows(); wake(400);
+}
+function hintClear(){ hintMove = -1; $('hA').hidden = $('hB').hidden = true; }
+function placeArrow(el, i, label, turnCls){
+  const b = bolts[i]; if (!b) return; proj.set(b.x, b.top + .55, b.z).project(camera);
+  el.style.transform = `translate(${(proj.x + 1) / 2 * innerWidth}px,${(1 - proj.y) / 2 * innerHeight}px)`;
+  el.firstChild.textContent = label; el.classList.toggle('turn', !!turnCls); el.hidden = false;
+}
+function paintHintArrows(){
+  if (hintMove < 0) return;
+  if (hintMove & 1024){ placeArrow($('hA'), hintMove & 31, sel === (hintMove & 31) ? 'Tap again' : 'Turn', true); $('hB').hidden = true; }
+  else { const i = hintMove >> 5, j = hintMove & 31; if (sel === i){ $('hA').hidden = true; placeArrow($('hB'), j, '2'); } else { placeArrow($('hA'), i, '1'); placeArrow($('hB'), j, '2'); } }
+}
+
+// ================= flow =================
+let score = 0, over = false, paused = false, adOpen = false, now = 0, shake = 0, sound = true, zenRun = 0, startKinds = [], winStars = 0;
+let store = {sound:true, mode:'levels', level:1, stars:{}, hints:3, bolts:2, best:{}, daily:{}, seen:false, intro:{}, zenBoards:0};
+try { const s = JSON.parse(localStorage.getItem(SAVE) || 'null'); if (s && s.stars) store = Object.assign(store, s); } catch(e){}
+sound = store.sound !== false; hints = store.hints ?? 3;
+function persist(){ try { store.sound = sound; store.mode = mode; store.hints = hints; localStorage.setItem(SAVE, JSON.stringify(store)); } catch(e){} }
+const totalStars = () => Object.values(store.stars).reduce((a, b) => a + b, 0);
+const todaySeed = () => { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
+const starsFor = (m, p, extra) => Math.min(extra ? 2 : 3, m <= p ? 3 : m <= p + Math.max(2, Math.ceil(p * .25)) ? 2 : 1);
+function loadDef(def){
+  LV = def; S = LV.b.slice(); history = []; moves = 0; sel = -1; lifted = []; usedExtra = false; undos = 3; finished = false; stuckShown = false; groupsPending = 0;
+  hintClear(); buildBoard(); startS = S.slice(); startIds = IDS.map(a => a.slice()); startKinds = nuts.map(n => n.kind);
+  paintStats(); setHintText('');
+  if (PLATFORM.name !== 'ios' && !M.zen) {}
+  setTimeout(maybeIntro, 700);
+}
+function startMode(id){
+  mode = id; M = MODES[id]; over = false; paused = false;
+  if (id === 'levels'){ level = store.level; loadDef(levelDef(level)); }
+  else if (id === 'daily'){ level = 0; loadDef(dailyDef()); }
+  else { zenRun = 0; level = 0; loadDef(zenDef(store.zenBoards)); }
+  zoneIdx = -1; checkZone(false); $('overlay').hidden = $('winSheet').hidden = $('pause').hidden = true; paintMode(); paintStats(); persist();
+}
+function win(){
+  const extra = usedExtra, stars = M.zen ? 0 : starsFor(moves, LV.par, extra);
+  winStars = stars; Sfx.win(); winFx(); haptic('success');
+  let pts = 0, newBest = false, best = 0;
+  if (mode === 'levels'){
+    const prev = store.stars[level] || 0; store.stars[level] = Math.max(prev, stars);
+    if (stars === 3 && prev < 3){ hints++; setTimeout(() => NEON.toast('+1 hint'), 900); }
+    if (level === store.level){ store.level = level + 1; if (level % 10 === 0){ store.bolts++; setTimeout(() => NEON.toast('+1 extra bolt'), 1300); } }
+    if (level % 5 === 0 && PLATFORM.onMilestone){ const v = level; setTimeout(() => PLATFORM.onMilestone(v), 2200); }
+    pts = stars * 100 + countColours() * 10; best = store.best.levels || 0; newBest = pts > best; if (newBest) store.best.levels = pts; best = Math.max(best, pts);
+  } else if (mode === 'daily'){
+    store.daily[todaySeed()] = Math.max(store.daily[todaySeed()] || 0, stars); if (PLATFORM.onHappy) setTimeout(() => PLATFORM.onHappy(stars), 1800);
+    pts = stars * 100 + countColours() * 10; best = store.best.daily || 0; newBest = pts > best; if (newBest) store.best.daily = pts; best = Math.max(best, pts);
+  } else {
+    zenRun++; store.zenBoards++; pts = zenRun; best = store.best.zen || 0; newBest = zenRun > best; if (newBest) store.best.zen = zenRun; best = Math.max(best, zenRun);
+    if (zenRun % 5 === 0 && PLATFORM.onMilestone){ const v = zenRun; setTimeout(() => PLATFORM.onMilestone(v), 2200); }
+  }
+  persist(); score = pts;
+  if (PLATFORM.onGameOver) PLATFORM.onGameOver({score:pts, best, mode, newBest, continued:false});
+  if (M.zen){
+    setTimeout(() => { if (mode !== 'zen' || !$('home').hidden) return; NEON.toast(`Board ${zenRun} lit`); checkZone(true); setTimeout(() => { if (mode === 'zen' && $('home').hidden) loadDef(zenDef(store.zenBoards)); }, 900); }, 900);
+    return;
+  }
+  setTimeout(() => {
+    $('winTitle').textContent = mode === 'daily' ? 'Daily solved' : `Level ${level} solved`;
+    $('winStars').innerHTML = [1, 2, 3].map(i => `<i class="${i <= stars ? 'on' : ''}" style="animation-delay:${i * .12}s"><svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></svg></i>`).join('');
+    $('winStats').innerHTML = [['Moves', moves], ['Par', LV.par], ['Stars', totalStars()]].map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join('');
+    $('winNext').hidden = mode !== 'levels'; $('winSheet').hidden = false;
+    if (PLATFORM.onWin) PLATFORM.onWin(level);
+  }, 1300);
+}
+const countColours = () => { let m = 0; for (const s of LV.b) for (let i = 0; i < s.length; i++) m |= 1 << pcol(s.charCodeAt(i)); let c = 0; while (m){ c++; m &= m - 1; } return c; };
+function winFx(){
+  bolts.forEach((b, i) => setTimeout(() => { if (!b.done) return; const c = LIN[b.doneC]; b.pulse0 = now; emit(b.x, b.top + .2, b.z, 30, c, 2.6, 1.4, 4, 1); wave(b.x, b.y + .1, b.z, b.top + .5, c, .45, .7, 2.5); }, i * 90));
+  shake = .12; wake(2500);
+}
+function showStuck(){
+  if (finished || !$('home').hidden) return;
+  if (CORE.moves(LV, S).length){ stuckShown = false; return; }
+  Sfx.lose(); haptic('medium');
+  $('ovBolt').textContent = usedExtra ? 'Restart' : 'Extra bolt';
+  $('ovUndo').disabled = !history.length; $('overlay').hidden = false;
+}
+const playing = () => !over && !paused && !adOpen && !!LV && $('home').hidden && $('overlay').hidden && $('winSheet').hidden && $('pause').hidden && $('coach').hidden && $('intro').hidden && document.visibilityState === 'visible';
+
+// ================= twist intros =================
+const INTROS = {
+  turn:{title:'Turn bolts', text:'A bolt with circling arrows can turn. Lift its top nuts, then tap it again: its bottom nut spins up to the top.'},
+  fuse:{title:'Fuse nuts', text:'A nut with a flickering band melts into the same-colour nut it touches. The double nut fills two slots and only moves as one.'},
+  cap:{title:'Capped bolts', text:'A capped bolt is sealed until the cap’s colour is finished on another bolt. Then the cap flies off and it opens up.'},
+};
+function maybeIntro(){
+  if (!LV || !$('home').hidden || !$('coach').hidden || !$('intro').hidden) return;
+  const have = {turn:LV.turn.some(Boolean), fuse:LV.b.some(s => /[A-J]/.test(s)), cap:LV.cap.some(c => c >= 0)};
+  for (const k of ['turn', 'fuse', 'cap']){ if (have[k] && !store.intro[k]){ showIntro(k); return; } }
+}
+function showIntro(k){
+  $('introTitle').textContent = INTROS[k].title; $('introText').textContent = INTROS[k].text; $('intro').dataset.k = k; $('intro').hidden = false;
+  requestAnimationFrame(() => drawIntro($('introCv'), k));
+}
+$('introOk').onclick = () => { store.intro[$('intro').dataset.k] = 1; persist(); $('intro').hidden = true; Sfx.unlock_(); setTimeout(maybeIntro, 300); };
+
+// ================= 2D drawings for cards: little neon bolts =================
+function drawMini(x, w, h, cols, opt = {}){
+  // cols: array of bolts, each an array of piece chars codes (bottom -> top)
+  const n = cols.length, gap = w / n, nutW = Math.min(gap * .78, 40), nutH = Math.min(nutW * .32, h / 7.2), base = h - 10;
+  x.clearRect(0, 0, w, h);
+  cols.forEach((s, i) => {
+    const cx = gap * (i + .5), C = opt.C || 4, top = base - (C * nutH + 16);
+    const g = x.createLinearGradient(cx - 3, 0, cx + 3, 0); g.addColorStop(0, '#6c6f8e'); g.addColorStop(.5, '#e8ebff'); g.addColorStop(1, '#6c6f8e');
+    x.fillStyle = g; x.fillRect(cx - 2.5, top, 5, base - top);
+    x.fillStyle = opt.turn && opt.turn[i] ? '#7af7ff' : '#3a3170'; x.fillRect(cx - nutW * .55, base, nutW * 1.1, 4);
+    if (opt.turn && opt.turn[i]){ x.save(); x.strokeStyle = '#7af7ff'; x.fillStyle = '#7af7ff'; x.shadowColor = '#2ee6ff'; x.shadowBlur = 8; x.lineWidth = 2;
+      const ry = base + 2, rx = nutW * .62;
+      for (const a0 of [0, Math.PI]){ x.beginPath(); x.ellipse(cx, ry, rx, 4.5, 0, a0 + .3, a0 + 2.4); x.stroke(); const ae = a0 + 2.4, px = cx + Math.cos(ae) * rx, py = ry + Math.sin(ae) * 4.5;
+        x.beginPath(); x.moveTo(px, py); x.lineTo(px + (a0 ? 5 : -5), py - 3); x.lineTo(px + (a0 ? 5 : -5), py + 3); x.fill(); }
+      x.restore(); }
+    let yy = base - 2;
+    for (let p = 0; p < s.length; p++){
+      const k = s.charCodeAt(p), hh = (k >= 109 ? 2 : 1) * nutH, c = COLORS[pcol(k)];
+      yy -= hh; x.save(); x.shadowColor = c; x.shadowBlur = 10; x.fillStyle = c; x.globalAlpha = opt.dim && opt.dim[i] ? .35 : 1;
+      const r = 3; x.beginPath(); x.moveTo(cx - nutW / 2 + r, yy + 1); x.lineTo(cx + nutW / 2 - r, yy + 1); x.lineTo(cx + nutW / 2, yy + hh / 2); x.lineTo(cx + nutW / 2 - r, yy + hh - 1); x.lineTo(cx - nutW / 2 + r, yy + hh - 1); x.lineTo(cx - nutW / 2, yy + hh / 2); x.closePath(); x.fill();
+      x.restore(); x.fillStyle = 'rgba(14,10,36,.55)'; x.fillRect(cx - 4, yy + 2, 8, hh - 4);
+      if (k < 97){ x.fillStyle = '#fff'; x.fillRect(cx - nutW / 2 + 2, yy + hh / 2 - .75, nutW - 4, 1.5); }
+    }
+    if (opt.cap && opt.cap[i] >= 0){ const c = COLORS[opt.cap[i]]; x.save(); x.shadowColor = c; x.shadowBlur = 12; x.fillStyle = c; x.beginPath(); x.arc(cx, top - 2, 7, Math.PI, 0); x.fill(); x.fillRect(cx - 9, top - 2, 18, 6); x.restore(); }
+  });
+}
+function fitCanvas(cv, hPx){ const dpr = Math.min(3, devicePixelRatio || 1), w = cv.clientWidth || 200, h = hPx || Math.round(w * .62); cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + 'px'; const x = cv.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); return {x, w, h}; }
+function miniBoard(cv, id){
+  const {x, w, h} = fitCanvas(cv);
+  let L;
+  if (id === 'levels') L = CORE.decode(LEVELS[Math.min(LEVELS.length, Math.max(1, store.level)) - 1] || '4|abab,baba,,|0');
+  else if (id === 'daily') L = {C:4, b:['adbc', 'cbda', 'bacd', 'dcab', '', ''], turn:[0, 1, 0, 0, 0, 0], cap:[-1, -1, -1, -1, -1, -1]};
+  else L = {C:4, b:['aaaa', 'bbbb', 'cc', 'dd', 'ccdd', ''], turn:[0, 0, 0, 0, 0, 0], cap:[-1, -1, -1, -1, -1, -1]};
+  const take = Math.min(L.b.length, 6);
+  drawMini(x, w, h, L.b.slice(0, take), {C:L.C, turn:L.turn.slice(0, take), cap:L.cap.slice(0, take)});
+}
+function drawIntro(cv, k){
+  const {x, w, h} = fitCanvas(cv, 120);
+  if (k === 'turn') drawMini(x, w, h, ['bcda', 'acdb', 'dabc'], {turn:[0, 1, 0]});
+  else if (k === 'fuse') drawMini(x, w, h, ['ab', 'cbA', 'ma', 'c'], {});
+  else drawMini(x, w, h, ['aaaa', 'bbcb', 'dcbd'], {cap:[-1, -1, 0], dim:[0, 0, 1]});
+}
+
+// ================= frame =================
+let last = 0, lastRender = 0, perfAcc = 0, perfN = 0, perfHold = 0, wakeUntil = 0;
+function wake(ms){ wakeUntil = Math.max(wakeUntil, performance.now() + ms); }
+function adaptResolution(rawDt){
+  if (rawDt > .25) return;
+  perfAcc += rawDt; perfN++; if (perfN < 40) return;
+  const avg = perfAcc / perfN; perfAcc = perfN = 0; if (perfHold > 0){ perfHold--; return; }
+  let nx = prNow; if (avg > 1 / 55 && prNow > PR_MIN) nx = Math.max(PR_MIN, prNow - .25); else if (avg < 1 / 58 && prNow < PR_MAX) nx = Math.min(PR_MAX, prNow + .25);
+  if (nx !== prNow){ prNow = nx; resize(); perfHold = 2; }
+}
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _zero = new THREE.Vector3(0, 0, 0), _up = new THREE.Vector3(0, 1, 0), _c = new THREE.Color();
+let dt = 0;
+function frame(ts){
+  requestAnimationFrame(frame);
+  const rawDt = (ts - (last || ts)) / 1000; last = ts;
+  if (document.visibilityState !== 'visible' || adOpen) return;
+  const active = ts < wakeUntil || pAlive > 0 || groupsPending > 0 || shake > 0 || texts.length > 0;
+  // idle: the board only breathes (pulses, motes, circling arrows), so ~20 fps is plenty
+  if (!active && ts - lastRender < 48) return;
+  if (active && ts - lastRender < 40) adaptResolution(rawDt); else perfAcc = perfN = 0;
+  dt = Math.min(.05, (ts - (lastRender || ts)) / 1000); lastRender = ts; now = ts; TIME.value = ts / 1000;
+  updateNuts(); updateBolts(); updateFx(); paintHintArrows();
+  if (boltsDirty){ let moving = false; for (let i = 0; i < nuts.length; i++) if (nuts[i].path){ moving = true; break; } if (!moving){ boltsDirty = false; refreshBolts(true); } }
+  const tt = now / 1000; updateZone(dt); updateMotes(dt);
+  for (let i = 0; i < 3; i++) nebula[i].material.opacity = .12 + Math.sin(tt * .4 + i * 2) * .03;
+  camera.position.copy(camBase);
+  if (shake > 0){ camera.position.x += (Math.random() - .5) * shake; camera.position.y += (Math.random() - .5) * shake; shake *= .86; if (shake < .005) shake = 0; }
+  composer.render();
+}
+function updateNuts(){
+  for (let i = 0; i < nuts.length; i++){
+    const n = nuts[i];
+    if (n.path) stepPath(n);
+    const b = bolts[n.b];
+    let g = 1;
+    if (n.lifted) g = 1.9;
+    else if (b && b.cap && !b.unlocked) g = .32;
+    else if (b && b.done && !n.path) g = 1.45 + Math.sin(now / 320 + n.b * .7) * .35 + Math.max(0, 1 - (now - b.pulse0) / 700) * 1.5;
+    if (hintMove >= 0 && !(hintMove & 1024) && n.b === (hintMove >> 5) && !n.lifted && IDS[n.b].indexOf(n.id) >= IDS[n.b].length - CORE.topRun(S[n.b])) g = 1.4 + Math.sin(now / 150) * .4;
+    n.glow += (g - n.glow) * Math.min(1, dt * 10);
+    const pop = n.pop ? Math.max(0, 1 - (now - n.pop) / 350) : 0;
+    _p.set(n.x, n.y, n.z); _q.setFromAxisAngle(_up, n.rot); _s.set(1 + pop * .25, 1 - pop * .1, 1 + pop * .25);
+    const dbl = n.kind === 2;
+    if (n.vis && !dbl){ _m.compose(_p, _q, _s); meshS.setMatrixAt(i, _m); } else { _m.makeScale(0, 0, 0); meshS.setMatrixAt(i, _m); }
+    if (n.vis && dbl){ _m.compose(_p, _q, _s); meshD.setMatrixAt(i, _m); } else { _m.makeScale(0, 0, 0); meshD.setMatrixAt(i, _m); }
+    const f = dbl ? fxD : fxS; f[i * 3] = n.glow + pop * 2; f[i * 3 + 1] = n.kind; f[i * 3 + 2] = n.c;
+  }
+  meshS.instanceMatrix.needsUpdate = meshD.instanceMatrix.needsUpdate = true;
+  geoS.attributes.aFx.needsUpdate = geoD.attributes.aFx.needsUpdate = true;
+}
+function updateBolts(){
+  const targets = sel >= 0 ? selTargets : null;
+  for (let i = 0; i < bolts.length; i++){ const b = bolts[i];
+    // base ring: idle accent, white when lifted, the nut colour on legal targets and on finished bolts
+    let k = .9;
+    if (b.done){ _c.copy(LIN[b.doneC]); k = 2.2 + Math.sin(now / 320 + i * .7) * .6; }
+    else if (sel === i){ _c.setRGB(1, 1, 1); k = 1.8; }
+    else if (targets && targets.indexOf(i) >= 0){ _c.copy(LIN[nuts[lifted[0]] ? nuts[lifted[0]].c : 0]); k = 1.1 + Math.sin(now / 160) * .35; }
+    else if (b.cap && !b.unlocked){ _c.copy(LIN[LV.cap[i]]); k = .5; }
+    else _c.copy(ringIdle), k = 1;
+    if (hintMove >= 0 && ((hintMove & 1024 ? hintMove & 31 : hintMove >> 5) === i || (!(hintMove & 1024) && (hintMove & 31) === i))){ _c.setRGB(1, .85, .3); k = 1.6 + Math.sin(now / 150) * .6; }
+    _c.multiplyScalar(k); b.ringCol.lerp(_c, Math.min(1, dt * 10)); b.ringMat.color.copy(b.ringCol);
+    // the rod itself glows in the finished colour
+    if (b.done){ b.rodMat.emissive.copy(LIN[b.doneC]).multiplyScalar(.35 + Math.sin(now / 320 + i * .7) * .15 + Math.max(0, 1 - (now - b.pulse0) / 600)); b.beam.material.color.copy(LIN[b.doneC]); b.beam.material.opacity = .22 + Math.sin(now / 320 + i * .7) * .08 + Math.max(0, 1 - (now - b.pulse0) / 800) * .6; }
+    else { b.rodMat.emissive.setRGB(0, 0, 0); b.beam.material.opacity = 0; }
+    if (b.collar){ b.spinV += (.8 - b.spinV) * Math.min(1, dt * 2.5); b.collar.rotation.y -= b.spinV * dt; }
+    if (b.cap){
+      if (b.capT >= 0){ const k2 = Math.min(1, (now - b.capT) / 700); b.cap.position.y = b.capY + EASE.out(k2) * 1.6; b.cap.rotation.y = k2 * 10; b.cap.scale.setScalar(Math.max(.01, 1 - k2 * k2)); if (k2 >= 1){ b.cap.visible = false; b.capT = -1; } }
+      else if (!b.unlocked){ b.cap.rotation.y = Math.sin(now / 900 + i) * .25; b.capMat.emissiveIntensity = 1.3 + Math.sin(now / 400 + i) * .3; }
+    }
+    let ox = 0; if (b.shakeT > 0){ const k3 = (now - b.shakeT) / 320; if (k3 < 1) ox = Math.sin(k3 * Math.PI * 6) * .07 * (1 - k3); else b.shakeT = -1; }
+    let sc = 1; if (b.popT){ const k4 = Math.min(1, (now - b.popT) / 450); sc = EASE.back(k4); if (k4 >= 1) b.popT = 0; }
+    b.g.position.set(b.x + ox, b.y, b.z); b.g.scale.setScalar(Math.max(.01, sc));
+  }
+}
+function updateFx(){
+  let alive = 0;
+  for (let i = 0; i < PMAX; i++){ const q = parts[i];
+    if (q.life > 0){ alive++; q.life -= q.decay * dt; q.vy -= q.grav * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt; q.vx *= .97; q.vz *= .97;
+      const f = Math.max(0, q.life); pPos[i * 3] = q.x; pPos[i * 3 + 1] = q.y; pPos[i * 3 + 2] = q.z; pCol[i * 3] = q.r * f; pCol[i * 3 + 1] = q.g * f; pCol[i * 3 + 2] = q.b * f; }
+    else if (pPos[i * 3 + 1] !== -99){ pPos[i * 3 + 1] = -99; pCol[i * 3] = pCol[i * 3 + 1] = pCol[i * 3 + 2] = 0; } }
+  pAlive = alive;
+  pGeo.attributes.position.needsUpdate = true; pGeo.attributes.color.needsUpdate = true;
+  for (const w of WAVES){ if (w.life <= 0) continue; w.life -= dt * 1.6; const k = 1 - Math.max(0, w.life), e = EASE.out(k);
+    w.m.position.y = w.y0 + (w.y1 - w.y0) * e; w.m.scale.setScalar(w.s0 + (w.s1 - w.s0) * e); w.m.material.opacity = Math.max(0, w.life); if (w.life <= 0) w.m.visible = false; }
+  for (let i = texts.length - 1; i >= 0; i--){ const t = texts[i]; t.life -= dt * (t.big ? .75 : 1.2);
+    if (t.life <= 0){ t.el.remove(); texts.splice(i, 1); continue; }
+    proj.set(t.x, t.y + (1 - t.life) * (t.big ? .4 : .7), t.z).project(camera);
+    const sc = t.big ? 1 + Math.sin(Math.min(1, (1 - t.life) * 4) * Math.PI / 2) * .15 : 1;
+    t.el.style.transform = `translate(${(proj.x + 1) / 2 * innerWidth}px,${(1 - proj.y) / 2 * innerHeight}px) translate(-50%,-50%) scale(${sc})`;
+    t.el.style.opacity = Math.min(1, t.life * 2); }
+}
+
+// ================= camera fit & taps =================
+const _v = new THREE.Vector3(), FIT = [];
+function resize(){
+  const W = innerWidth, Hh = innerHeight;
+  renderer.setPixelRatio(prNow); renderer.setSize(W, Hh); composer.setPixelRatio(prNow); composer.setSize(W, Hh);
+  camera.aspect = W / Hh; camera.clearViewOffset();
+  if (!bolts.length){ camera.position.set(0, 2, 14); camera.lookAt(0, 1.5, 0); camera.updateProjectionMatrix(); camBase.copy(camera.position); return; }
+  const top = ($('hud').getBoundingClientRect().bottom || 110 * uiZoom) + 14, bot = ($('bottom').getBoundingClientRect().top || Hh - 100 * uiZoom) - 26;
+  FIT.length = 0; let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  for (const b of bolts){ for (const dx of [-.55, .55]){ FIT.push([b.x + dx, b.y - .12, b.z + .5], [b.x + dx, b.top + .62, b.z]); } x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x); y0 = Math.min(y0, b.y); y1 = Math.max(y1, b.top); }
+  const target = new THREE.Vector3((x0 + x1) / 2, (y0 + y1) / 2, -.3), dir = new THREE.Vector3(0, .3, 1).normalize();
+  const place = d => { camera.position.copy(target).addScaledVector(dir, d); camera.lookAt(target); camera.updateMatrixWorld(); camera.updateProjectionMatrix(); };
+  const box = () => { let a = 1e9, bb = -1e9, c = 1e9, e = -1e9; for (const p of FIT){ _v.set(p[0], p[1], p[2]).project(camera); const x = (_v.x + 1) / 2 * W, y = (1 - _v.y) / 2 * Hh; a = Math.min(a, x); bb = Math.max(bb, x); c = Math.min(c, y); e = Math.max(e, y); } return {w:bb - a, h:e - c, cy:(c + e) / 2}; };
+  let lo = 3, hi = 200; for (let i = 0; i < 30; i++){ const m = (lo + hi) / 2; place(m); const b = box(); if (b.w <= W * .95 && b.h <= bot - top) hi = m; else lo = m; }
+  place(Math.max(hi, 7.5));
+  const b = box(); camera.setViewOffset(W, Hh, 0, b.cy - (top + bot) / 2, W, Hh); camera.updateProjectionMatrix();
+  camBase.copy(camera.position);
+  backGlow.position.set(target.x, target.y, -5);
+  wake(300);
+}
+let uiZoom = 1;
+function setUIZoom(){
+  const W = innerWidth, H = innerHeight, land = W > H, m = Math.min(W, H);
+  uiZoom = m >= 700 ? Math.max(1, Math.min(1.6, m / (land ? 700 : 600))) : 1;
+  document.documentElement.style.setProperty('--uiz', uiZoom);
+  document.body.classList.toggle('wide', land && W >= 900 && m >= 600);
+}
+setUIZoom();
+// rotation / window resize mid-level: same state, fresh layout (rows are re-chosen for the new shape)
+function relayout(){
+  if (!LV || !bolts.length) return;
+  for (const n of nuts){ if (n.onEnd){ const cb = n.onEnd; n.onEnd = null; n.path = null; cb(n); } n.path = null; }
+  placeBolts(); reindex();
+  for (const n of nuts){ if (!n.vis) continue; const t = slotOf(n.id); n.x = t.x; n.y = t.y + (n.lifted ? LIFT : 0); n.z = t.z; }
+}
+let rzT = 0;
+addEventListener('resize', () => { setUIZoom(); relayout(); resize(); if (!$('home').hidden){ clearTimeout(rzT); rzT = setTimeout(paintHome, 60); } });
+// the bolt under a tap: its column from the shelf to above the lifted nuts, a little wider than the nut
+function boltAt(cx, cy){
+  let best = -1, bd = 1e9;
+  for (let i = 0; i < bolts.length; i++){
+    const b = bolts[i]; _v.set(b.x, b.y - .1, b.z).project(camera); const bx = (_v.x + 1) / 2 * innerWidth, by0 = (1 - _v.y) / 2 * innerHeight;
+    _v.set(b.x, b.top + .7, b.z).project(camera); const by1 = (1 - _v.y) / 2 * innerHeight;
+    _v.set(b.x + SPACING / 2, b.y, b.z).project(camera); const half = Math.abs((_v.x + 1) / 2 * innerWidth - bx);
+    if (cy < by1 - 8 || cy > by0 + 24) continue;
+    const d = Math.abs(cx - bx); if (d < half && d < bd){ bd = d; best = i; }
+  }
+  return best;
+}
+
+// ================= HUD =================
+function setStat(id, label, val, low){ const el = $(id); el.firstChild.textContent = label; el.lastChild.textContent = val; el.lastChild.classList.toggle('low', !!low); }
+function paintStats(){
+  if (!LV) return;
+  if (mode === 'levels'){ $('score').textContent = 'Level ' + level; $('bestWrap').firstChild.textContent = 'Stars'; $('best').textContent = totalStars(); setStat('sA', 'Moves', moves, moves > LV.par); setStat('sB', 'Par', LV.par); }
+  else if (mode === 'daily'){ $('score').textContent = new Date().toLocaleDateString('en-US', {month:'short', day:'numeric'}); $('bestWrap').firstChild.textContent = 'Stars'; $('best').textContent = totalStars(); setStat('sA', 'Moves', moves, moves > LV.par); setStat('sB', 'Par', LV.par); }
+  else { $('score').textContent = 'Board ' + (store.zenBoards + 1); $('bestWrap').firstChild.textContent = 'Best run'; $('best').textContent = store.best.zen || 0; setStat('sA', 'Moves', moves); setStat('sB', 'This run', zenRun); }
+  $('hintN').textContent = hints; $('hintBtn').classList.toggle('empty', hints <= 0);
+  $('undoN').textContent = undos; $('undoBtn').classList.toggle('empty', undos <= 0); $('undoBtn').classList.toggle('free', !!M.zen); $('undoBtn').disabled = !history.length;
+  $('boltN').textContent = store.bolts; $('boltBtn').classList.toggle('empty', store.bolts <= 0); $('boltBtn').disabled = usedExtra;
+}
+function paintMode(){ $('modeName').textContent = M.name; }
+let hintGone = false;
+function hideHint(){ if (hintGone) return; hintGone = true; }
+function setHintText(t){ const el = $('hint'); if (!t){ el.textContent = hintGone ? '' : 'Tap a bolt to lift its top nuts'; return; } el.textContent = t; }
+$('undoBtn').onclick = () => { Sfx.unlock_(); undo(); };
+$('restartBtn').onclick = () => { Sfx.unlock_(); restart(); };
+$('hintBtn').onclick = () => { Sfx.unlock_(); hint(); };
+$('boltBtn').onclick = () => { Sfx.unlock_(); addBolt(); };
+function pauseGame(){ if (over || paused || !$('home').hidden || !LV) return; paused = true; dropBack(); $('pStats').innerHTML = (M.zen ? [['Moves', moves], ['This run', zenRun], ['Best run', store.best.zen || 0]] : [['Moves', moves], ['Par', LV.par], ['Stars', totalStars()]]).map(([a, b]) => `<div><small>${a}</small><b>${b}</b></div>`).join(''); $('pause').hidden = false; persist(); }
+function resumeGame(){ paused = false; $('pause').hidden = true; Sfx.unlock_(); wake(300); }
+$('pauseBtn').onclick = () => { Sfx.unlock_(); pauseGame(); };
+$('pResume').onclick = resumeGame;
+$('pRestart').onclick = () => { resumeGame(); restart(); };
+$('pHome').onclick = () => { $('pause').hidden = true; paused = false; showHome(); };
+$('pHelp').onclick = () => { $('pause').hidden = true; $('coach').hidden = false; };
+$('coachOk').onclick = () => { $('coach').hidden = true; store.seen = true; paused = false; persist(); Sfx.unlock_(); setTimeout(maybeIntro, 300); };
+$('winNext').onclick = () => { Sfx.unlock_(); $('winSheet').hidden = true; level = store.level; loadDef(levelDef(level)); checkZone(true); };
+$('winReplay').onclick = () => { $('winSheet').hidden = true; finished = false; loadDef(mode === 'levels' ? levelDef(level) : dailyDef()); };
+$('winHome').onclick = () => { $('winSheet').hidden = true; showHome(); };
+$('ovUndo').onclick = () => { $('overlay').hidden = true; stuckShown = false; undo(); };
+$('ovBolt').onclick = () => { if (usedExtra){ $('overlay').hidden = true; stuckShown = false; restart(); } else addBolt(); };
+$('ovRestart').onclick = () => { $('overlay').hidden = true; stuckShown = false; restart(); };
+$('ovModes').onclick = () => { $('overlay').hidden = true; showHome(); };
+const paintSound = () => { $('soundBtn').classList.toggle('off', !sound); $('homeSound').classList.toggle('off', !sound); };
+$('soundBtn').onclick = $('homeSound').onclick = () => { sound = !sound; paintSound(); persist(); Sfx.unlock_(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible'){ pauseGame(); persist(); } else wake(500); });
+window.NEON = {
+  addHints(n){ hints += n; persist(); paintStats(); },
+  addBolts(n){ store.bolts += n; persist(); paintStats(); if (!usedExtra && LV && !finished && $('home').hidden) addBolt(); },
+  addUndos(n){ undos += n; paintStats(); },
+  toast(msg){ floatText(msg, backGlow.position.x, backGlow.position.y + .4, 1, '#ffd84a', 24, true); },
+  continueGame(){},
+  get mode(){ return mode; }, get over(){ return over; }, get level(){ return level; },
+  set adOpen(v){ adOpen = !!v; if (!v) wake(400); },
+  // test hooks (used by the headless bot; harmless in play)
+  _state(){ return {S:S.slice(), C:LV && LV.C, turn:LV && LV.turn.slice(), cap:LV && LV.cap.slice(), par:LV && LV.par, sel, moves, finished, busy:groupsPending, hint:hintMove}; },
+  _boltScreen(i){ const b = bolts[i]; _v.set(b.x, b.y + BASE_H + b.len * .45, b.z).project(camera); return {x:(_v.x + 1) / 2 * innerWidth, y:(1 - _v.y) / 2 * innerHeight}; },
+};
+
+// ================= home =================
+const BADGE = {daily:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/></svg>',
+  zen:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12c3-6 13-6 16 0-3 6-13 6-16 0z"/><circle cx="12" cy="12" r="2.5"/></svg>'};
+let shelfMode = 'levels';
+function cardMeta(id){
+  if (id === 'levels') return `<span>Level<b>${store.level}</b></span><span>Stars<b>${totalStars()}</b></span>`;
+  if (id === 'daily'){ const s = store.daily[todaySeed()]; return `<span>Today<b>${s ? '★'.repeat(s) : '—'}</b></span>`; }
+  return `<span>Boards<b>${store.zenBoards}</b></span><span>Best run<b>${store.best.zen || 0}</b></span>`;
+}
+function buildShelf(){
+  $('shelf').innerHTML = MODE_IDS.map(id => `<button class="mcard2" data-mode="${id}"><div class="mini"><canvas></canvas>${BADGE[id] ? `<span class="badge">${BADGE[id]}</span>` : ''}</div><b>${MODES[id].name}</b><p>${MODES[id].desc}</p><span class="meta">${cardMeta(id)}</span></button>`).join('');
+  $('dots').innerHTML = MODE_IDS.map(() => '<i></i>').join('');
+  requestAnimationFrame(() => [...$('shelf').children].forEach(card => miniBoard(card.querySelector('canvas'), card.dataset.mode)));
+}
+function padShelf(){ const sh = $('shelf'), c = sh.children[0]; if (!c || document.body.classList.contains('wide')) return; const p = Math.max(16, sh.clientWidth / 2 - c.offsetWidth / 2) + 'px'; sh.style.paddingLeft = sh.style.paddingRight = p; }
+function focusShelf(id, smooth){
+  padShelf(); shelfMode = id; const i = MODE_IDS.indexOf(id), card = $('shelf').children[i];
+  if (card) $('shelf').scrollTo({left:card.offsetLeft - ($('shelf').clientWidth - card.offsetWidth) / 2, behavior:smooth ? 'smooth' : 'auto'});
+  paintShelf();
+}
+function paintShelf(){
+  [...$('shelf').children].forEach(c => c.classList.toggle('on', c.dataset.mode === shelfMode));
+  [...$('dots').children].forEach((d, i) => d.classList.toggle('on', MODE_IDS[i] === shelfMode));
+  $('playBtn').textContent = shelfMode === 'levels' && store.level > 1 ? `Play level ${store.level}` : 'Play';
+}
+let shelfT = 0;
+$('shelf').addEventListener('scroll', () => {
+  const sh = $('shelf'), mid = sh.scrollLeft + sh.clientWidth / 2;
+  let bestId = shelfMode, bd = 1e9; for (const c of sh.children){ const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd){ bd = d; bestId = c.dataset.mode; } }
+  if (bestId !== shelfMode){ shelfMode = bestId; paintShelf(); clearTimeout(shelfT); shelfT = setTimeout(() => Sfx.tick(), 60); }
+}, {passive:true});
+$('shelf').addEventListener('click', e => { const c = e.target.closest('[data-mode]'); if (!c) return; Sfx.unlock_(); if (c.dataset.mode === shelfMode) startPlay(); else focusShelf(c.dataset.mode, true); });
+function paintHome(){ buildShelf(); paintSound(); requestAnimationFrame(() => focusShelf(shelfMode, false)); }
+function boardVisible(on){ world.visible = on; $('bottom').hidden = !on; }
+function showHome(){ persist(); dropBack(); hintClear(); shelfMode = mode; paintHome(); boardVisible(false); $('overlay').hidden = $('pause').hidden = $('coach').hidden = $('winSheet').hidden = $('intro').hidden = true; $('home').hidden = false; $('hud').hidden = true; $('hint').hidden = true; wake(300); }
+function startPlay(){
+  Sfx.unlock_(); $('home').hidden = true; $('hud').hidden = false; $('hint').hidden = false; boardVisible(true);
+  startMode(shelfMode); resize(); Sfx.zone();
+  if (!store.seen) $('coach').hidden = false;
+}
+$('playBtn').onclick = startPlay;
+
+// ================= input =================
+addEventListener('keydown', e => {
+  if (e.code === 'KeyP' || e.code === 'Escape'){ e.preventDefault(); if (paused) resumeGame(); else pauseGame(); return; }
+  if (!playing()) return;
+  const d = /^Digit(\d)$/.exec(e.code); if (d){ const i = (+d[1] + 9) % 10; if (i < bolts.length) tapBolt(i); return; }
+  if (e.code === 'KeyZ') undo(); if (e.code === 'KeyR') restart(); if (e.code === 'KeyH') hint(); if (e.code === 'KeyB') addBolt();
+});
+let down = null;
+host.addEventListener('pointerdown', e => { Sfx.unlock_(); down = {x:e.clientX, y:e.clientY}; });
+host.addEventListener('pointerup', e => {
+  if (!down) return; const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y); down = null;
+  if (moved > 30 || !playing()) return;
+  const i = boltAt(e.clientX, e.clientY);
+  if (i >= 0) tapBolt(i); else if (sel >= 0) dropBack();
+});
+
+// ================= sound (synthesized) =================
+const Sfx = (() => {
+  let ac = null, out = null;
+  const unlock_ = () => { if (ac){ ac.resume && ac.resume(); return; } try { ac = new (window.AudioContext || window.webkitAudioContext)(); out = ac.createGain(); out.gain.value = .5; out.connect(ac.destination); } catch(e){} };
+  function tone(f0, f1, dur, type = 'sine', vol = .15, delay = 0){
+    if (!ac || !sound) return; const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), gn = ac.createGain(); o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .006); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn); gn.connect(out); o.start(t); o.stop(t + dur + .03);
+  }
+  function noise(dur, vol, f, delay = 0, q = .8){
+    if (!ac || !sound) return; const t = ac.currentTime + delay, b = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.sin(Math.PI * i / d.length);
+    const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), gn = ac.createGain(); s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = q; gn.gain.value = vol;
+    s.connect(bp); bp.connect(gn); gn.connect(out); s.start(t);
+  }
+  const note = n => 262 * Math.pow(2, n / 12);
+  const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];
+  return {unlock_,
+    tick:() => tone(1800, 1500, .03, 'triangle', .04),
+    lift:n => { for (let i = 0; i < 3; i++) tone(1300 + i * 180, 1500 + i * 180, .03, 'triangle', .05, i * .045); noise(.16, .04, 2400, 0, 2); },
+    drop:() => { for (let i = 0; i < 3; i++) tone(1500 - i * 160, 1300 - i * 160, .03, 'triangle', .04, i * .04); },
+    // the thread: a run of quick clicks that slows as the nut seats
+    screw:k => { let t = .3; for (let i = 0; i < 7; i++){ tone(2300 - i * 60, 2100 - i * 60, .02, 'square', .018, t); t += .035 + i * .008; } noise(.25, .03, 3200, .05, 3); },
+    click:() => { tone(1900, 1750, .1, 'triangle', .07); tone(2900, 2850, .06, 'sine', .035); },
+    complete:c => { [0, 4, 7, 12].forEach((s, k) => tone(note(SCALE[c % 10] + s + 7), note(SCALE[c % 10] + s + 7), .45, 'triangle', .07, k * .06)); noise(.5, .04, 5000, .05, 1.5); },
+    fuse:() => { tone(180, 1400, .18, 'sawtooth', .05); noise(.2, .06, 2600, 0, 1.2); tone(note(24), note(24), .3, 'sine', .06, .12); },
+    turn:() => { noise(.4, .07, 700, 0, .9); tone(300, 620, .35, 'triangle', .06); },
+    unlock:() => { tone(400, 1200, .12, 'square', .04); [0, 7, 12].forEach((s, k) => tone(note(s + 19), note(s + 19), .35, 'sine', .07, .08 + k * .07)); },
+    bolt:() => { [0, 5, 9, 12].forEach((s, k) => tone(note(s + 12), note(s + 12), .25, 'triangle', .07, k * .05)); noise(.3, .04, 1500); },
+    nope:() => tone(150, 110, .12, 'square', .04),
+    undo:() => tone(620, 420, .12, 'triangle', .07),
+    hint:() => [0, 7].forEach((s, k) => tone(note(s + 19), note(s + 19), .3, 'sine', .06, k * .08)),
+    win:() => [0, 4, 7, 12, 16, 19].forEach((n, i) => tone(note(n + 7), note(n + 7), .4, 'triangle', .11, i * .08)),
+    zone:() => { [0, 7, 12, 19].forEach((n, i) => tone(note(n), note(n), .8, 'sine', .06, i * .09)); noise(.9, .04, 500); },
+    lose:() => [0, 1, 2].forEach(i => tone(330 / (1 + i * .2), 200 / (1 + i * .2), .32, 'triangle', .08, i * .15)),
+  };
+})();
+
+// ================= start =================
+paintSound();
+const splashT0 = performance.now();
+$('splashBar').style.width = '45%';
+function hideSplash(){
+  $('splashBar').style.width = '100%';
+  const wait = Math.max(0, 1400 - (performance.now() - splashT0));
+  setTimeout(() => { $('splash').classList.add('out'); setTimeout(() => $('splash').remove(), 550); }, wait);
+}
+const begin = () => {
+  $('splashBar').style.width = '80%';
+  mode = MODES[store.mode] ? store.mode : 'levels'; M = MODES[mode]; level = store.level;
+  resize(); showHome();
+  requestAnimationFrame(frame); requestAnimationFrame(() => requestAnimationFrame(hideSplash));
+};
+(document.fonts && document.fonts.load ? Promise.all([document.fonts.load("100px 'Russo One'"), document.fonts.load("80px 'Neonderthaw'")]).catch(() => {}) : Promise.resolve()).then(begin);
+})();
+</script>
+<script>// Runs inside each game page, after the game's own code. It adds a way back to the arcade and turns finished rounds into XP.
+(() => {
+  const GAME = window.ARCADE_GAME, A = window.Arcade, P = window.PLATFORM || (window.PLATFORM = {});
+  if (!GAME || !A) return;
+  A.state.last = GAME; A.save();
+
+  // back to the arcade: a key in the game's own top bar, drawn in that game's own style
+  const top = document.getElementById('homeTop');
+  if (top){
+    // borrow the class of the game's own top-bar buttons ('key' in most games, 'chip' in Tightrope)
+    const own = top.querySelector('button'), cls = own && own.classList.contains('chip') ? 'chip' : 'key';
+    const b = document.createElement('button'); b.className = cls; b.id = 'arcadeBack'; b.setAttribute('aria-label', 'Back to all games');
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 6 8.5 12l6 6"/></svg><span>Games</span>';
+    b.onclick = e => { e.stopPropagation(); location.href = '../index.html'; };
+    top.prepend(b);
+    // Tightrope's chips are light-on-dark: its icons are white, so the label is too
+    if (cls === 'chip') b.style.color = '#fff';
+  }
+  const css = document.createElement('style');
+  css.textContent = `#arcadeBack{margin-right:auto;display:inline-flex;align-items:center;gap:4px;padding:0 14px 0 8px!important;font-weight:700;font-size:15px}
+    #arcadeBack svg{width:20px;height:20px}
+    #homeTop{justify-content:flex-end}
+    .arcadeToast{position:fixed;left:50%;top:calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 14px);transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;
+      font:700 14px/1.2 system-ui,-apple-system,sans-serif;color:#fff;animation:arcIn .35s cubic-bezier(.2,1.4,.4,1) both, arcOut .4s ease 3.4s forwards}
+    .arcadeToast b{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;background:rgba(20,18,40,.88);box-shadow:0 8px 24px rgba(0,0,0,.3);white-space:nowrap}
+    .arcadeToast b i{font-style:normal;color:#ffd23f}
+    .arcadeToast small{padding:6px 12px;border-radius:999px;background:rgba(62,224,197,.92);color:#0d2a26;font-weight:800;white-space:nowrap}
+    @keyframes arcIn{from{opacity:0;transform:translate(-50%,-14px) scale(.9)}}
+    @keyframes arcOut{to{opacity:0;transform:translate(-50%,-10px)}}`;
+  // no text selection, magnifier loupe or callout on a long press in any game (iOS shows them on plain text otherwise)
+  css.textContent += `*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}input,textarea{-webkit-user-select:text;user-select:text}`;
+  addEventListener('contextmenu', e => e.preventDefault()); document.addEventListener('selectstart', e => { if (!e.target.closest || !e.target.closest('input,textarea')) e.preventDefault(); });
+  document.head.appendChild(css);
+
+  // every finished round counts toward the player's arcade level and today's missions
+  const orig = P.onGameOver;
+  P.onGameOver = function(r){
+    let res = null; try { res = A.report(GAME, r); } catch(e){}
+    if (res) setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'arcadeToast';
+      t.innerHTML = `<b><i>+${res.gain} XP</i>${res.levelUp ? ` · Level ${res.levelUp}!` : ''}</b>` + res.done.map(d => `<small>✓ ${d}</small>`).join('');
+      document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+    }, 900);
+    return orig ? orig.apply(this, arguments) : undefined;
+  };
+})();
+</script>
+</body>
+</html>
