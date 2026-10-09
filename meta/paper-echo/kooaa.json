@@ -1,0 +1,13 @@
+{
+  "category": "calm",
+  "color": "#f2b84b",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Paper Echo",
+    "description": "Kâğıt kuşlar şarkı söyler, sen tekrarla"
+  },
+  "en": {
+    "name": "Paper Echo",
+    "description": "Paper birds sing, you sing it back"
+  }
+}

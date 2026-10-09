@@ -1,0 +1,13 @@
+{
+  "category": "physics",
+  "color": "#e8a33a",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Deckload",
+    "description": "Gemiyi yükle, dengede tut"
+  },
+  "en": {
+    "name": "Deckload",
+    "description": "Load her up, keep her level"
+  }
+}

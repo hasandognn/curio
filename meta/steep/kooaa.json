@@ -1,0 +1,13 @@
+{
+  "category": "calm",
+  "color": "#d9733f",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Steep",
+    "description": "Küçük bir çay evi, elle demlenen çaylar"
+  },
+  "en": {
+    "name": "Steep",
+    "description": "A little tea house, poured by hand"
+  }
+}

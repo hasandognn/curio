@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#3fb8c4",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Tidepool",
+    "description": "Dalgayı gönder, her canlıyı yerine yerleştir"
+  },
+  "en": {
+    "name": "Tidepool",
+    "description": "Send the tide, settle every creature"
+  }
+}

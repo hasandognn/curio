@@ -1,0 +1,13 @@
+{
+  "category": "reflex",
+  "color": "#ff6b5b",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Tightrope",
+    "description": "Şehrin üstünde dengeni koru"
+  },
+  "en": {
+    "name": "Tightrope",
+    "description": "Keep your balance high above the city"
+  }
+}

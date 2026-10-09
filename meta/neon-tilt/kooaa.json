@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#5aa9ff",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Tilt",
+    "description": "Tahtayı eğ, her topu yuvasına yuvarla"
+  },
+  "en": {
+    "name": "Neon Tilt",
+    "description": "Tilt the board, roll every ball home"
+  }
+}

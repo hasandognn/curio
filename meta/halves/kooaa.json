@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#ffd400",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Halves",
+    "description": "Tek kaydırma, iki eşit yarım"
+  },
+  "en": {
+    "name": "Halves",
+    "description": "One swipe, two equal halves"
+  }
+}

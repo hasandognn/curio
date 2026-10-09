@@ -1,0 +1,13 @@
+{
+  "category": "reflex",
+  "color": "#ff7a59",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Kite",
+    "description": "Rüzgâra bin, ipe dikkat et"
+  },
+  "en": {
+    "name": "Kite",
+    "description": "Ride the gusts, mind the line"
+  }
+}

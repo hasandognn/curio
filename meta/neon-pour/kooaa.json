@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#c86bff",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Pour",
+    "description": "Işığı dök, her rengi ayır"
+  },
+  "en": {
+    "name": "Neon Pour",
+    "description": "Pour the light, sort every colour"
+  }
+}

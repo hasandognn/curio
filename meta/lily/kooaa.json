@@ -1,0 +1,13 @@
+{
+  "category": "reflex",
+  "color": "#e8c26a",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Lily",
+    "description": "Bir kurbağa, bir gölet, ateşböcekleriyle dolu bir gece"
+  },
+  "en": {
+    "name": "Lily",
+    "description": "A frog, a pond, a night of fireflies"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#3ee0c5",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Fuse",
+    "description": "Kabloları çevir, kıvılcımı canlı tut"
+  },
+  "en": {
+    "name": "Neon Fuse",
+    "description": "Turn the wires, keep the spark alive"
+  }
+}

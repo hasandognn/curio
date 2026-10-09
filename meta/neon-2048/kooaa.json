@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#ff8a3d",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon 2048",
+    "description": "Işık karolarını kaydır ve birleştir"
+  },
+  "en": {
+    "name": "Neon 2048",
+    "description": "Slide and merge tiles of light"
+  }
+}

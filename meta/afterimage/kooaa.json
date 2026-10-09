@@ -1,0 +1,13 @@
+{
+  "category": "reflex",
+  "color": "#8f7bff",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Afterimage",
+    "description": "Geçmişteki hâlin hemen arkanda"
+  },
+  "en": {
+    "name": "Afterimage",
+    "description": "Your past self is right behind you"
+  }
+}

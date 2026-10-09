@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#ff4d8d",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Blocks",
+    "description": "Diz, temizle, kuyuyu aydınlat"
+  },
+  "en": {
+    "name": "Neon Blocks",
+    "description": "Stack, clear and light up the well"
+  }
+}

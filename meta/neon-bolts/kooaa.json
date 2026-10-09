@@ -1,0 +1,13 @@
+{
+  "category": "puzzle",
+  "color": "#3ee0c5",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Bolts",
+    "description": "Somunları çevir, her cıvatayı yak"
+  },
+  "en": {
+    "name": "Neon Bolts",
+    "description": "Spin the nuts, light every bolt"
+  }
+}

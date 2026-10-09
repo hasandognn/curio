@@ -1,0 +1,13 @@
+{
+  "category": "reflex",
+  "color": "#ffd23f",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Neon Orbit",
+    "description": "Halkayı çevir, ateş et, çekirdeği yak"
+  },
+  "en": {
+    "name": "Neon Orbit",
+    "description": "Turn the ring, fire, light up the core"
+  }
+}

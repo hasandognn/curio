@@ -1,0 +1,13 @@
+{
+  "category": "calm",
+  "color": "#d9733f",
+  "logo": "logo.jpg",
+  "tr": {
+    "name": "Pottery",
+    "description": "Şekillendir, fırınla, rafa koy"
+  },
+  "en": {
+    "name": "Pottery",
+    "description": "Throw it, fire it, put it on the shelf"
+  }
+}
